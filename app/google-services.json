@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "16115391784",
+    "project_id": "tkuschedule",
+    "storage_bucket": "tkuschedule.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:16115391784:android:afb89406abfe50d731441d",
+        "android_client_info": {
+          "package_name": "com.example.tkuschedule"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCpW8mLMBD5QekPXRR63JugiPXXhCEac54"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
