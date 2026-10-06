@@ -28,8 +28,8 @@ class FloatingCatAssistantController(
 
     companion object {
 
-        // 提醒對話框固定顯示 10 秒
-        private const val MESSAGE_DURATION_MS = 10_000L
+        // 提醒對話框固定顯示 7 秒
+        private const val MESSAGE_DURATION_MS = 6_000L
 
         // 放著不操作多久後趴下
         private const val LIE_DOWN_DELAY_MS = 8_000L
@@ -458,7 +458,7 @@ class FloatingCatAssistantController(
     /**
      * 顯示貓咪提醒。
      *
-     * 每次呼叫後固定顯示 10 秒，
+     * 每次呼叫後固定顯示 7 秒，
      * 接著自動淡出。
      */
     fun showReminder(
@@ -507,7 +507,7 @@ class FloatingCatAssistantController(
         mainHandler.removeCallbacks(returnToIdleRunnable)
         mainHandler.postDelayed(returnToIdleRunnable, 1_600L)
 
-        // 10 秒後自動消失
+        // 7 秒後自動消失
         mainHandler.postDelayed(
             hideMessageRunnable,
             MESSAGE_DURATION_MS

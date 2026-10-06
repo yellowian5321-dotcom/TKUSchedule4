@@ -1,85 +1,103 @@
 package com.example.tkuschedule
 
-import android.os.Bundle
-import android.os.Build
 import android.Manifest
 import android.content.pm.PackageManager
-import androidx.activity.result.contract.ActivityResultContracts
-import com.example.tkuschedule.reminder.ClassReminderScheduler
-import com.example.tkuschedule.reminder.ClassReminderNotifier
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import android.os.Build
+import android.os.Bundle
 import android.util.Log
-import androidx.activity.ComponentActivity
 import android.widget.FrameLayout
-import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.ViewCompositionStrategy
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.ViewModelProvider
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.example.tkuschedule.location.NextClassCalculator
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.collect
-import com.example.tkuschedule.data.Course
-import com.example.tkuschedule.ai.AiAssistantScreen
+import com.example.tkuschedule.assistant.CatClassMessage
 import com.example.tkuschedule.assistant.FloatingCatAssistantController
+import com.example.tkuschedule.data.Course
+import com.example.tkuschedule.location.NextClassCalculator
+import com.example.tkuschedule.location.NextClassInfo
+import com.example.tkuschedule.location.NextClassLocationViewModel
+import com.example.tkuschedule.reminder.ClassReminderNotifier
+import com.example.tkuschedule.reminder.ClassReminderPlan
+import com.example.tkuschedule.reminder.ClassReminderScheduler
 import com.example.tkuschedule.ui.schedule.ScheduleScreen
 import com.example.tkuschedule.ui.schedule.ScheduleViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
 
 class MainActivity : ComponentActivity() {
     private lateinit var catController: FloatingCatAssistantController
     private lateinit var scheduleViewModel: ScheduleViewModel
-    private val showAiAssistant = mutableStateOf(false)
-    private var lastReminderKey: String? = null
+    private lateinit var locationViewModel: NextClassLocationViewModel
+
+    private var lastNextClassKey: Pair<Course, LocalDateTime>? = null
+    private var pendingCatRequestKey: Pair<Course, LocalDateTime>? = null
+    private var lastClassReminderKey: Pair<Course, LocalDateTime>? = null
+    private val taipeiZone = ZoneId.of("Asia/Taipei")
+
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> if (granted) refreshPhoneReminders(force = true) }
+    ) { granted ->
+        if (granted) refreshPhoneReminders(force = true)
+    }
+
+    private val locationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        if (hasLocationPermission()) {
+            showCatClassInfo()
+        } else if (::catController.isInitialized) {
+            catController.showReminder(
+                CatClassMessage.build(
+                    scheduleViewModel.uiState.value.courses,
+                    locationViewModel.uiState.value
+                ) + "\n可到手機設定允許本 App 使用位置喵。"
+            )
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        scheduleViewModel = ViewModelProvider(this)[ScheduleViewModel::class.java]
+        val provider = ViewModelProvider(this)
+        scheduleViewModel = provider[ScheduleViewModel::class.java]
+        locationViewModel = provider[NextClassLocationViewModel::class.java]
+
         val root = FrameLayout(this)
         val composeView = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setViewCompositionStrategy(
+                ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
+            )
             setContent {
                 MaterialTheme {
-                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                        Box(Modifier.fillMaxSize()) {
-                            ScheduleScreen(viewModel = scheduleViewModel)
-                            if (showAiAssistant.value) {
-                                AiAssistantDialog(scheduleViewModel) { showAiAssistant.value = false }
-                            }
-                        }
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        ScheduleScreen(viewModel = scheduleViewModel)
                     }
                 }
             }
         }
         root.addView(composeView, FrameLayout.LayoutParams(-1, -1))
+
         val overlay = FrameLayout(this).apply {
             isClickable = false
             isFocusable = false
@@ -88,53 +106,165 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
         setContentView(root)
-        // 原生小貓移動不會讓 Compose 課表跟著重組。
+
         catController = FloatingCatAssistantController(
-            activity = this, overlayContainer = overlay,
-            onOpenAssistant = { showAiAssistant.value = true }
+            activity = this,
+            overlayContainer = overlay,
+            // 沿用控制器的回呼名稱，現在只顯示貓貓泡泡。
+            onOpenAssistant = ::showCatClassInfo
         )
+
         ClassReminderNotifier.createChannel(this)
         requestNotificationPermissionOnce()
-        // 新 Activity 啟動時補回可能被強制停止或系統清除的 PendingIntent。
         refreshPhoneReminders(force = true)
+        observeCatReminders()
+    }
+
+    private fun showCatClassInfo() {
+        val state = scheduleViewModel.uiState.value
+        if (state.isRestoringSchedule) {
+            catController.showReminder("正在讀取你的課表，等一下再點我喵！")
+            return
+        }
+        refreshCatLocation(state.courses, force = true)
+        if (NextClassCalculator.findNextClass(state.courses) != null &&
+            !hasLocationPermission()
+        ) {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    private fun refreshCatLocation(courses: List<Course>, force: Boolean) {
+        val next = NextClassCalculator.findNextClass(courses)
+        if (next == null) {
+            pendingCatRequestKey = null
+            locationViewModel.cancelRefresh()
+            catController.showReminder(
+                CatClassMessage.build(courses, locationViewModel.uiState.value)
+            )
+            return
+        }
+        pendingCatRequestKey = classKey(next)
+        locationViewModel.refresh(courses, force)
+        val location = locationViewModel.uiState.value
+        catController.showReminder(CatClassMessage.build(courses, location))
+        if (!location.isLoading) pendingCatRequestKey = null
+    }
+
+    private fun observeCatReminders() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                scheduleViewModel.uiState.map { it.courses }.distinctUntilChanged().collect { courses ->
-                    if (scheduleViewModel.uiState.value.isRestoringSchedule) return@collect
-                    val next = NextClassCalculator.findNextClass(courses)
+                combine(
+                    scheduleViewModel.uiState.map {
+                        it.courses to it.isRestoringSchedule
+                    }.distinctUntilChanged(),
+                    locationViewModel.uiState,
+                    catClock()
+                ) { schedule, location, clock ->
+                    Triple(schedule, location, clock)
+                }.collect { (schedule, location, clock) ->
+                    val (courses, restoring) = schedule
+                    if (restoring) return@collect
+
+                    val nowMillis = System.currentTimeMillis()
+                    val now = Instant.ofEpochMilli(nowMillis)
+                        .atZone(taipeiZone).toLocalDateTime()
+                    val next = NextClassCalculator.findNextClass(courses, now)
                     if (next == null) {
-                        lastReminderKey = null
+                        lastNextClassKey = null
+                        lastClassReminderKey = null
+                        pendingCatRequestKey = null
+                        locationViewModel.cancelRefresh()
                         return@collect
                     }
-                    val key = "${next.course.id}|${next.startDateTime}"
-                    if (key != lastReminderKey) {
-                        catController.showReminder("下一堂是「${next.courseName}」\n${next.startDateTime.toLocalDate()} ${next.startTimeText}｜${next.classroom}")
-                        lastReminderKey = key
+
+                    val key = classKey(next)
+                    if (lastNextClassKey != key) {
+                        lastNextClassKey = key
+                        refreshCatLocation(courses, force = false)
+                        return@collect
+                    }
+
+                    if (pendingCatRequestKey == key && !location.isLoading &&
+                        location.nextClass?.course == next.course &&
+                        location.nextClass?.startDateTime == next.startDateTime
+                    ) {
+                        pendingCatRequestKey = null
+                        catController.showReminder(
+                            CatClassMessage.build(courses, location, nowMillis)
+                        )
+                    }
+
+                    val remindAt = next.startDateTime
+                        .minusMinutes(clock.minutesBefore.toLong())
+                    if (clock.enabled && !now.isBefore(remindAt) &&
+                        lastClassReminderKey != key
+                    ) {
+                        lastClassReminderKey = key
+                        catController.showReminder(
+                            "快上課了喵！\n" +
+                                    CatClassMessage.build(courses, location, nowMillis)
+                        )
                     }
                 }
             }
         }
     }
 
+    // 只更新時間及提醒設定，不會每 30 秒要求 GPS。
+    private fun catClock() = flow {
+        while (true) {
+            val clock = withContext(Dispatchers.IO) {
+                CatClock(
+                    enabled = ClassReminderScheduler.isEnabled(applicationContext),
+                    minutesBefore = ClassReminderScheduler.getMinutesBefore(
+                        applicationContext
+                    )
+                )
+            }
+            emit(clock)
+            delay(30_000L)
+        }
+    }
+
+    private fun classKey(next: NextClassInfo) =
+        next.course to next.startDateTime
+
+    private fun hasLocationPermission(): Boolean =
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED ||
+                checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+
     override fun onResume() {
         super.onResume()
-        catController.resume()
+        if (::catController.isInitialized) catController.resume()
+        lastNextClassKey = null
         refreshPhoneReminders()
     }
 
     override fun onPause() {
-        catController.pause()
+        pendingCatRequestKey = null
+        if (::locationViewModel.isInitialized) locationViewModel.cancelRefresh()
+        if (::catController.isInitialized) catController.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
-        catController.destroy()
+        if (::catController.isInitialized) catController.destroy()
         super.onDestroy()
     }
 
     private fun requestNotificationPermissionOnce() {
-        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED) return
+        if (Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
         val prefs = getSharedPreferences("tku_reminder_permission", MODE_PRIVATE)
         if (!prefs.getBoolean("asked", false)) {
             prefs.edit().putBoolean("asked", true).apply()
@@ -143,133 +273,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshPhoneReminders(force: Boolean = false) {
-        val appContext = applicationContext
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 try {
-                    ClassReminderScheduler.refresh(appContext, force)
+                    ClassReminderScheduler.refresh(applicationContext, force)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (error: Exception) {
                     Log.e("ClassReminder", "無法更新提醒排程", error)
                 }
             }
         }
     }
-}
 
-@Composable
-private fun AiAssistantDialog(scheduleViewModel: ScheduleViewModel, onClose: () -> Unit) {
-    // 只在開啟 AI 對話時讀取完整課表狀態，首頁不跟著輸入欄位更新。
-    val state by scheduleViewModel.uiState.collectAsStateWithLifecycle()
-    val count = remember(state.courses) { countUniqueCourses(state.courses) }
-    Dialog(onDismissRequest = onClose, properties = DialogProperties(
-        usePlatformDefaultWidth = false, decorFitsSystemWindows = false
-    )) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize()) {
-                AiAssistantTopBar(count, onClose)
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    AiAssistantScreen(courses = state.courses)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AiAssistantTopBar(
-    courseCount: Int,
-    onClose: () -> Unit
-) {
-    Surface(
-        modifier =
-            Modifier.fillMaxWidth(),
-
-        color =
-            MaterialTheme
-                .colorScheme
-                .primaryContainer,
-
-        shadowElevation = 4.dp
-    ) {
-        Row(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .padding(
-                        start = 16.dp,
-                        end = 8.dp,
-                        top = 8.dp,
-                        bottom = 8.dp
-                    ),
-
-            verticalAlignment =
-                Alignment.CenterVertically,
-
-            horizontalArrangement =
-                Arrangement.SpaceBetween
-        ) {
-            Column(
-                modifier =
-                    Modifier.weight(1f)
-            ) {
-                Text(
-                    text =
-                        "小貓課表助理",
-
-                    style =
-                        MaterialTheme
-                            .typography
-                            .titleMedium
-                )
-
-                Text(
-                    text =
-                        if (courseCount == 0) {
-                            "目前尚未匯入課程"
-                        } else {
-                            "已讀取 $courseCount 門課程"
-                        },
-
-                    style =
-                        MaterialTheme
-                            .typography
-                            .bodySmall
-                )
-            }
-
-            TextButton(
-                onClick = onClose
-            ) {
-                Text("關閉")
-            }
-        }
-    }
-}
-
-/*
- * 計算實際課程數量。
- *
- * 同一門課可能有多個上課時段，
- * 但只會計算成一門課。
- */
-private fun countUniqueCourses(
-    courses:
-    List<com.example.tkuschedule.data.Course>
-): Int {
-    return courses
-        .groupBy { course ->
-            if (
-                course.courseNo
-                    .isNotBlank()
-            ) {
-                "${course.departmentCode}|" +
-                        course.courseNo
-            } else {
-                "${course.departmentCode}|" +
-                        "${course.subjectCode}|" +
-                        "${course.className}|" +
-                        course.courseName
-            }
-        }
-        .size
+    private data class CatClock(
+        val enabled: Boolean,
+        val minutesBefore: Int = ClassReminderPlan.DEFAULT_MINUTES_BEFORE
+    )
 }

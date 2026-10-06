@@ -21,9 +21,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tkuschedule.data.Course
-import com.example.tkuschedule.location.NextClassLocationCard
-import com.example.tkuschedule.location.NextClassLocationStatusCard
-import com.example.tkuschedule.location.NextClassLocationUiState
 import com.example.tkuschedule.ui.settings.SettingsScreen
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -63,9 +60,7 @@ private val periodLabels = listOf(
 @Composable
 fun ScheduleScreen(
     viewModel: ScheduleViewModel =
-        androidx.lifecycle.viewmodel.compose.viewModel(),
-    locationState: NextClassLocationUiState? = null,
-    onRefreshLocation: (() -> Unit)? = null
+        androidx.lifecycle.viewmodel.compose.viewModel()
 ) {
     // 搜尋文字只由搜尋輸入區收集，減少整個畫面更新。
     val screenFlow = remember(viewModel) {
@@ -233,8 +228,6 @@ fun ScheduleScreen(
                         state = state,
                         viewModel = viewModel,
                         scrollState = managementScrollState,
-                        locationState = locationState,
-                        onRefreshLocation = onRefreshLocation,
                         onDepartment = viewModel::selectDepartment,
                         onGrade = viewModel::selectGrade,
                         onClassName = viewModel::selectClassName,
@@ -339,8 +332,6 @@ private fun CourseManagementPage(
     state: ScheduleUiState,
     viewModel: ScheduleViewModel,
     scrollState: LazyListState,
-    locationState: NextClassLocationUiState?,
-    onRefreshLocation: (() -> Unit)?,
     onDepartment: (String) -> Unit,
     onGrade: (Int) -> Unit,
     onClassName: (String) -> Unit,
@@ -372,28 +363,6 @@ private fun CourseManagementPage(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item(
-            key = "next_class",
-            contentType = "next_class"
-        ) {
-            if (
-                locationState != null &&
-                onRefreshLocation != null
-            ) {
-                NextClassLocationStatusCard(
-                    state = locationState,
-                    onRefresh = onRefreshLocation
-                )
-            } else {
-                NextClassLocationCard(
-                    courses = state.courses,
-                    modifier = Modifier.padding(
-                        horizontal = 12.dp
-                    )
-                )
-            }
-        }
-
         item(
             key = "required_course",
             contentType = "required_course"
