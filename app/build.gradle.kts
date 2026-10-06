@@ -1,48 +1,117 @@
-plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.compose)
+import java.util.Properties
 
-    id("com.google.gms.google-services") version "4.4.4"
+plugins {
+    alias(
+        libs.plugins.android.application
+    )
+
+    alias(
+        libs.plugins.kotlin.android
+    )
+
+    alias(
+        libs.plugins.kotlin.compose
+    )
+
+    id(
+        "com.google.gms.google-services"
+    ) version "4.4.4"
 }
 
+/*
+ * 從 local.properties 讀取 Routes API Key。
+ */
+val localProperties =
+    Properties().apply {
+
+        val propertiesFile =
+            rootProject.file(
+                "local.properties"
+            )
+
+        if (propertiesFile.exists()) {
+
+            propertiesFile
+                .inputStream()
+                .use {
+                    load(it)
+                }
+        }
+    }
+
+val routesApiKey =
+    localProperties
+        .getProperty(
+            "ROUTES_API_KEY",
+            ""
+        )
+        .trim()
+
 android {
-    namespace = "com.example.tkuschedule"
+
+    namespace =
+        "com.example.tkuschedule"
 
     compileSdk {
-        version = release(36)
+        version =
+            release(36)
     }
 
     defaultConfig {
-        applicationId = "com.example.tkuschedule"
+
+        applicationId =
+            "com.example.tkuschedule"
 
         minSdk = 26
 
         targetSdk {
-            version = release(36)
+            version =
+                release(36)
         }
 
         versionCode = 1
-        versionName = "1.0"
+
+        versionName =
+            "1.0"
 
         testInstrumentationRunner =
             "androidx.test.runner.AndroidJUnitRunner"
+
+        /*
+         * 產生：
+         *
+         * BuildConfig.ROUTES_API_KEY
+         */
+        buildConfigField(
+            type = "String",
+
+            name =
+                "ROUTES_API_KEY",
+
+            value =
+                "\"${routesApiKey}\""
+        )
     }
 
     buildTypes {
+
         release {
-            isMinifyEnabled = false
+
+            isMinifyEnabled =
+                false
 
             proguardFiles(
                 getDefaultProguardFile(
                     "proguard-android-optimize.txt"
                 ),
+
                 "proguard-rules.pro"
             )
         }
     }
 
     compileOptions {
+
         sourceCompatibility =
             JavaVersion.VERSION_11
 
@@ -51,15 +120,26 @@ android {
     }
 
     kotlinOptions {
-        jvmTarget = "11"
+
+        jvmTarget =
+            "11"
     }
 
     buildFeatures {
-        compose = true
+
+        compose =
+            true
+
+        /*
+         * 允許使用 BuildConfig。
+         */
+        buildConfig =
+            true
     }
 }
 
 dependencies {
+
     /*
      * Android Core。
      */
@@ -71,14 +151,9 @@ dependencies {
         "androidx.core:core-ktx:1.17.0"
     )
 
-    /*
-     * 不再使用 libs.androidx.activity.compose。
-     *
-     * 原本版本太新，會要求 core 1.19.0，
-     * 因此改成與 compileSdk 36 相容的版本。
-     */
     implementation(
-        "androidx.activity:activity-compose:1.11.0"
+        "androidx.activity:" +
+                "activity-compose:1.11.0"
     )
 
     /*
@@ -130,12 +205,17 @@ dependencies {
     )
 
     /*
-     * 網路與課程資料。
+     * OkHttp：
+     * 課程網站與 Routes API 都會使用。
      */
     implementation(
-        "com.squareup.okhttp3:okhttp:4.12.0"
+        "com.squareup.okhttp3:" +
+                "okhttp:4.12.0"
     )
 
+    /*
+     * 解析淡江課程網站。
+     */
     implementation(
         "org.jsoup:jsoup:1.23.2"
     )
@@ -145,12 +225,14 @@ dependencies {
      */
     implementation(
         platform(
-            "com.google.firebase:firebase-bom:34.3.0"
+            "com.google.firebase:" +
+                    "firebase-bom:34.3.0"
         )
     )
 
     implementation(
-        "com.google.firebase:firebase-ai"
+        "com.google.firebase:" +
+                "firebase-ai"
     )
 
     /*
@@ -167,7 +249,7 @@ dependencies {
     )
 
     /*
-     * 單元測試。
+     * 測試。
      */
     testImplementation(
         libs.junit
@@ -201,16 +283,19 @@ dependencies {
 }
 
 /*
- * 防止其他相依套件把 Core 升到 1.19.0。
+ * 防止相依套件把 Core 自動升到 1.19.0。
  */
 configurations.all {
+
     resolutionStrategy {
+
         force(
             "androidx.core:core:1.17.0"
         )
 
         force(
-            "androidx.core:core-ktx:1.17.0"
+            "androidx.core:" +
+                    "core-ktx:1.17.0"
         )
 
         force(
@@ -223,4 +308,27 @@ configurations.all {
                     "activity-compose:1.11.0"
         )
     }
+}
+android {
+    buildTypes {
+        create("performance") {
+            initWith(getByName("release"))
+
+            isDebuggable = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            versionNameSuffix = "-performance"
+
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+}
+dependencies {
+    implementation("androidx.fragment:fragment-ktx:1.8.9")
 }

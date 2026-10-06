@@ -4,49 +4,14 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Divider
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.ScrollableTabRow
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Tab
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -56,9 +21,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tkuschedule.data.Course
+import com.example.tkuschedule.location.NextClassLocationCard
+import com.example.tkuschedule.location.NextClassLocationStatusCard
+import com.example.tkuschedule.location.NextClassLocationUiState
+import com.example.tkuschedule.ui.settings.SettingsScreen
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 private const val PAGE_COURSE_MANAGEMENT = 0
 private const val PAGE_MY_SCHEDULE = 1
+private const val PAGE_SETTINGS = 2
 
 private val weekdayLabels = listOf(
     1 to "星期一",
@@ -91,20 +63,50 @@ private val periodLabels = listOf(
 @Composable
 fun ScheduleScreen(
     viewModel: ScheduleViewModel =
-        androidx.lifecycle.viewmodel.compose.viewModel()
+        androidx.lifecycle.viewmodel.compose.viewModel(),
+    locationState: NextClassLocationUiState? = null,
+    onRefreshLocation: (() -> Unit)? = null
 ) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    // 搜尋文字只由搜尋輸入區收集，減少整個畫面更新。
+    val screenFlow = remember(viewModel) {
+        viewModel.uiState
+            .map { it.copy(courseSearchQuery = "") }
+            .distinctUntilChanged()
+    }
+
+    val state by screenFlow.collectAsStateWithLifecycle(
+        initialValue = viewModel.uiState.value.copy(
+            courseSearchQuery = ""
+        )
+    )
+
+    if (state.isRestoringSchedule) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator()
+        }
+        return
+    }
 
     val snackbarHostState = remember {
         SnackbarHostState()
     }
 
-    var selectedPage by remember {
+    var selectedPage by rememberSaveable {
         mutableIntStateOf(PAGE_COURSE_MANAGEMENT)
     }
 
-    var selectedWeekday by remember {
+    var selectedWeekday by rememberSaveable {
         mutableIntStateOf(1)
+    }
+
+    val managementScrollState = rememberLazyListState()
+    val scheduleScrollState = rememberLazyListState()
+
+    val courseCount = remember(state.courses) {
+        state.courses.distinctBy(::courseKey).size
     }
 
     var selectedCourse by remember {
@@ -130,42 +132,33 @@ fun ScheduleScreen(
                 title = {
                     Column {
                         Text(
-                            text = if (
-                                selectedPage ==
-                                PAGE_COURSE_MANAGEMENT
-                            ) {
-                                "課程管理"
-                            } else {
-                                "我的課表"
+                            text = when (selectedPage) {
+                                PAGE_COURSE_MANAGEMENT -> "課程管理"
+                                PAGE_MY_SCHEDULE -> "我的課表"
+                                else -> "設定"
                             }
                         )
 
-                        if (state.semester.isNotBlank()) {
+                        if (
+                            selectedPage != PAGE_SETTINGS &&
+                            state.semester.isNotBlank()
+                        ) {
                             Text(
                                 text = state.semester,
-                                style =
-                                    MaterialTheme
-                                        .typography
-                                        .labelSmall
+                                style = MaterialTheme.typography.labelSmall
                             )
                         }
                     }
                 },
                 actions = {
                     if (
-                        selectedPage ==
-                        PAGE_MY_SCHEDULE &&
+                        selectedPage == PAGE_MY_SCHEDULE &&
                         state.courses.isNotEmpty()
                     ) {
                         Text(
-                            text =
-                                "${state.courses.distinctBy(::courseKey).size} 門課",
-                            style =
-                                MaterialTheme
-                                    .typography
-                                    .labelLarge,
-                            modifier =
-                                Modifier.padding(end = 16.dp)
+                            text = "$courseCount 門課",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(end = 16.dp)
                         )
                     }
                 }
@@ -175,11 +168,9 @@ fun ScheduleScreen(
             NavigationBar {
                 NavigationBarItem(
                     selected =
-                        selectedPage ==
-                                PAGE_COURSE_MANAGEMENT,
+                        selectedPage == PAGE_COURSE_MANAGEMENT,
                     onClick = {
-                        selectedPage =
-                            PAGE_COURSE_MANAGEMENT
+                        selectedPage = PAGE_COURSE_MANAGEMENT
                     },
                     icon = {
                         Text(
@@ -194,12 +185,9 @@ fun ScheduleScreen(
                 )
 
                 NavigationBarItem(
-                    selected =
-                        selectedPage ==
-                                PAGE_MY_SCHEDULE,
+                    selected = selectedPage == PAGE_MY_SCHEDULE,
                     onClick = {
-                        selectedPage =
-                            PAGE_MY_SCHEDULE
+                        selectedPage = PAGE_MY_SCHEDULE
                     },
                     icon = {
                         Text(
@@ -212,13 +200,28 @@ fun ScheduleScreen(
                         Text("我的課表")
                     }
                 )
+
+                NavigationBarItem(
+                    selected = selectedPage == PAGE_SETTINGS,
+                    onClick = {
+                        selectedPage = PAGE_SETTINGS
+                    },
+                    icon = {
+                        Text(
+                            text = "⚙",
+                            fontSize = 22.sp
+                        )
+                    },
+                    label = {
+                        Text("設定")
+                    }
+                )
             }
         },
         snackbarHost = {
             SnackbarHost(snackbarHostState)
         }
     ) { innerPadding ->
-
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -228,29 +231,24 @@ fun ScheduleScreen(
                 PAGE_COURSE_MANAGEMENT -> {
                     CourseManagementPage(
                         state = state,
-                        onDepartment =
-                            viewModel::selectDepartment,
-                        onGrade =
-                            viewModel::selectGrade,
-                        onClassName =
-                            viewModel::selectClassName,
-                        onLoadCourses =
-                            viewModel::loadCourses,
-                        onRetryDepartments =
-                            viewModel::loadDepartments,
+                        viewModel = viewModel,
+                        scrollState = managementScrollState,
+                        locationState = locationState,
+                        onRefreshLocation = onRefreshLocation,
+                        onDepartment = viewModel::selectDepartment,
+                        onGrade = viewModel::selectGrade,
+                        onClassName = viewModel::selectClassName,
+                        onLoadCourses = viewModel::loadCourses,
+                        onRetryDepartments = viewModel::loadDepartments,
                         onSearchQueryChange =
-                            viewModel::
-                            updateCourseSearchQuery,
-                        onSearch =
-                            viewModel::searchCourses,
+                            viewModel::updateCourseSearchQuery,
+                        onSearch = viewModel::searchCourses,
                         onCourseClick = {
                             selectedCourse = it
                         },
-                        onRemove =
-                            viewModel::removeManualCourse,
+                        onRemove = viewModel::removeManualCourse,
                         onOpenSchedule = {
-                            selectedPage =
-                                PAGE_MY_SCHEDULE
+                            selectedPage = PAGE_MY_SCHEDULE
                         }
                     )
                 }
@@ -258,8 +256,8 @@ fun ScheduleScreen(
                 PAGE_MY_SCHEDULE -> {
                     MySchedulePage(
                         courses = state.courses,
-                        selectedWeekday =
-                            selectedWeekday,
+                        scrollState = scheduleScrollState,
+                        selectedWeekday = selectedWeekday,
                         onWeekdaySelected = {
                             selectedWeekday = it
                         },
@@ -267,9 +265,14 @@ fun ScheduleScreen(
                             selectedCourse = it
                         },
                         onGoToManagement = {
-                            selectedPage =
-                                PAGE_COURSE_MANAGEMENT
+                            selectedPage = PAGE_COURSE_MANAGEMENT
                         }
+                    )
+                }
+
+                PAGE_SETTINGS -> {
+                    SettingsScreen(
+                        courseCount = courseCount
                     )
                 }
             }
@@ -280,15 +283,13 @@ fun ScheduleScreen(
         SearchResultDialog(
             results = state.courseSearchResults,
             onChoose = viewModel::chooseOffering,
-            onDismiss =
-                viewModel::clearSearchResults
+            onDismiss = viewModel::clearSearchResults
         )
     }
 
     state.pendingConflictOffering?.let { offering ->
         AlertDialog(
-            onDismissRequest =
-                viewModel::dismissConflict,
+            onDismissRequest = viewModel::dismissConflict,
             title = {
                 Text("課程時間衝堂")
             },
@@ -301,16 +302,14 @@ fun ScheduleScreen(
             },
             confirmButton = {
                 Button(
-                    onClick =
-                        viewModel::confirmConflict
+                    onClick = viewModel::confirmConflict
                 ) {
                     Text("仍要匯入")
                 }
             },
             dismissButton = {
                 TextButton(
-                    onClick =
-                        viewModel::dismissConflict
+                    onClick = viewModel::dismissConflict
                 ) {
                     Text("取消")
                 }
@@ -321,11 +320,9 @@ fun ScheduleScreen(
     selectedCourse?.let { course ->
         CourseDetailDialog(
             course = course,
-            isManualCourse =
-                state.manualCourses.any {
-                    courseKey(it) ==
-                            courseKey(course)
-                },
+            isManualCourse = state.manualCourses.any {
+                courseKey(it) == courseKey(course)
+            },
             onRemove = {
                 viewModel.removeManualCourse(course)
                 selectedCourse = null
@@ -340,6 +337,10 @@ fun ScheduleScreen(
 @Composable
 private fun CourseManagementPage(
     state: ScheduleUiState,
+    viewModel: ScheduleViewModel,
+    scrollState: LazyListState,
+    locationState: NextClassLocationUiState?,
+    onRefreshLocation: (() -> Unit)?,
     onDepartment: (String) -> Unit,
     onGrade: (Int) -> Unit,
     onClassName: (String) -> Unit,
@@ -351,57 +352,75 @@ private fun CourseManagementPage(
     onRemove: (Course) -> Unit,
     onOpenSchedule: () -> Unit
 ) {
-    val manualKeys = state.manualCourses
-        .map(::courseKey)
-        .toSet()
+    val manualKeys = remember(state.manualCourses) {
+        state.manualCourses.map(::courseKey).toSet()
+    }
 
-    val courseOfferings = state.courses
-        .groupBy(::courseKey)
-        .values
-        .map { sessions ->
-            sessions.first()
-        }
-        .sortedWith(
-            compareBy<Course> {
-                it.weekday
-            }.thenBy {
-                periodNumber(
-                    it.periods.firstOrNull()
-                )
-            }
-        )
+    val courseOfferings = remember(state.courses) {
+        state.courses
+            .distinctBy(::courseKey)
+            .sortedWith(
+                compareBy<Course> { it.weekday }
+                    .thenBy {
+                        periodNumber(it.periods.firstOrNull())
+                    }
+            )
+    }
 
     LazyColumn(
+        state = scrollState,
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement =
-            Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        item {
+        item(
+            key = "next_class",
+            contentType = "next_class"
+        ) {
+            if (
+                locationState != null &&
+                onRefreshLocation != null
+            ) {
+                NextClassLocationStatusCard(
+                    state = locationState,
+                    onRefresh = onRefreshLocation
+                )
+            } else {
+                NextClassLocationCard(
+                    courses = state.courses,
+                    modifier = Modifier.padding(
+                        horizontal = 12.dp
+                    )
+                )
+            }
+        }
+
+        item(
+            key = "required_course",
+            contentType = "required_course"
+        ) {
             RequiredCoursePanel(
                 state = state,
                 onDepartment = onDepartment,
                 onGrade = onGrade,
                 onClassName = onClassName,
                 onLoad = onLoadCourses,
-                onRetryDepartments =
-                    onRetryDepartments,
-                modifier = Modifier
-                    .padding(
-                        start = 12.dp,
-                        end = 12.dp,
-                        top = 12.dp
-                    )
+                onRetryDepartments = onRetryDepartments,
+                modifier = Modifier.padding(
+                    start = 12.dp,
+                    end = 12.dp,
+                    top = 12.dp
+                )
             )
         }
 
-        item {
-            CourseImportPanel(
-                query =
-                    state.courseSearchQuery,
-                loading =
-                    state.isSearchingCourses,
-                onQueryChange =
-                    onSearchQueryChange,
+        item(
+            key = "course_search",
+            contentType = "course_search"
+        ) {
+            CourseSearchInputPanel(
+                viewModel = viewModel,
+                loading = state.isSearchingCourses,
+                onQueryChange = onSearchQueryChange,
                 onSearch = onSearch,
                 modifier = Modifier.padding(
                     horizontal = 12.dp
@@ -410,7 +429,10 @@ private fun CourseManagementPage(
         }
 
         if (state.courses.isNotEmpty()) {
-            item {
+            item(
+                key = "open_schedule",
+                contentType = "open_schedule"
+            ) {
                 Button(
                     onClick = onOpenSchedule,
                     modifier = Modifier
@@ -421,7 +443,10 @@ private fun CourseManagementPage(
                 }
             }
 
-            item {
+            item(
+                key = "course_heading",
+                contentType = "course_heading"
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -429,40 +454,34 @@ private fun CourseManagementPage(
                             horizontal = 12.dp,
                             vertical = 2.dp
                         ),
-                    verticalAlignment =
-                        Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         text = "目前課程",
-                        style =
-                            MaterialTheme
-                                .typography
-                                .titleMedium,
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier.weight(1f)
                     )
 
                     Text(
-                        text =
-                            "${courseOfferings.size} 門",
-                        color =
-                            MaterialTheme
-                                .colorScheme
-                                .onSurfaceVariant
+                        text = "${courseOfferings.size} 門",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
             items(
                 items = courseOfferings,
-                key = ::courseKey
+                key = {
+                    "course:${courseKey(it)}"
+                },
+                contentType = {
+                    "course_card"
+                }
             ) { course ->
-
                 ManagementCourseCard(
                     course = course,
-                    isManual =
-                        courseKey(course) in
-                                manualKeys,
+                    isManual = courseKey(course) in manualKeys,
                     onClick = {
                         onCourseClick(course)
                     },
@@ -475,27 +494,28 @@ private fun CourseManagementPage(
                 )
             }
 
-            item {
+            item(
+                key = "footer",
+                contentType = "spacer"
+            ) {
                 Spacer(
                     modifier = Modifier.height(12.dp)
                 )
             }
         } else {
-            item {
+            item(
+                key = "empty_courses",
+                contentType = "empty_courses"
+            ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(130.dp),
-                    contentAlignment =
-                        Alignment.Center
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text =
-                            "尚未載入或匯入任何課程",
-                        color =
-                            MaterialTheme
-                                .colorScheme
-                                .onSurfaceVariant
+                        text = "尚未載入或匯入任何課程",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -506,33 +526,39 @@ private fun CourseManagementPage(
 @Composable
 private fun MySchedulePage(
     courses: List<Course>,
+    scrollState: LazyListState,
     selectedWeekday: Int,
     onWeekdaySelected: (Int) -> Unit,
     onCourseClick: (Course) -> Unit,
     onGoToManagement: () -> Unit
 ) {
+    val counts = remember(courses) {
+        weekdayLabels.associate { (day, _) ->
+            day to courses
+                .filter { it.weekday == day }
+                .distinctBy(::courseKey)
+                .size
+        }
+    }
+
+    val dayCourses = remember(courses, selectedWeekday) {
+        courses.filter {
+            it.weekday == selectedWeekday
+        }
+    }
+
     Column(
         modifier = Modifier.fillMaxSize()
     ) {
         ScrollableTabRow(
-            selectedTabIndex =
-                selectedWeekday - 1,
+            selectedTabIndex = selectedWeekday - 1,
             edgePadding = 8.dp
         ) {
-            weekdayLabels.forEach {
-                    (weekday, label) ->
-
-                val count = courses
-                    .filter {
-                        it.weekday == weekday
-                    }
-                    .distinctBy(::courseKey)
-                    .size
+            weekdayLabels.forEach { (weekday, label) ->
+                val count = counts[weekday] ?: 0
 
                 Tab(
-                    selected =
-                        selectedWeekday ==
-                                weekday,
+                    selected = selectedWeekday == weekday,
                     onClick = {
                         onWeekdaySelected(weekday)
                     },
@@ -563,28 +589,19 @@ private fun MySchedulePage(
                 buttonText = "前往課程管理",
                 onClick = onGoToManagement
             )
+        } else if (dayCourses.isEmpty()) {
+            EmptySchedule(
+                title = weekdayName(selectedWeekday) + "沒有課程",
+                message = "這一天目前沒有排入任何課程。",
+                buttonText = "管理課程",
+                onClick = onGoToManagement
+            )
         } else {
-            val dayCourses = courses.filter {
-                it.weekday == selectedWeekday
-            }
-
-            if (dayCourses.isEmpty()) {
-                EmptySchedule(
-                    title =
-                        weekdayName(selectedWeekday) +
-                                "沒有課程",
-                    message =
-                        "這一天目前沒有排入任何課程。",
-                    buttonText = "管理課程",
-                    onClick = onGoToManagement
-                )
-            } else {
-                DayScheduleGrid(
-                    courses = dayCourses,
-                    onCourseClick =
-                        onCourseClick
-                )
-            }
+            DayScheduleGrid(
+                courses = dayCourses,
+                scrollState = scrollState,
+                onCourseClick = onCourseClick
+            )
         }
     }
 }
@@ -592,9 +609,21 @@ private fun MySchedulePage(
 @Composable
 private fun DayScheduleGrid(
     courses: List<Course>,
+    scrollState: LazyListState,
     onCourseClick: (Course) -> Unit
 ) {
+    val cells = remember(courses) {
+        periodLabels.associate { (period, _) ->
+            period to courses.filter { course ->
+                course.periods.any {
+                    normalizePeriod(it) == normalizePeriod(period)
+                }
+            }.distinctBy(::courseKey)
+        }
+    }
+
     LazyColumn(
+        state = scrollState,
         modifier = Modifier
             .fillMaxSize()
             .padding(
@@ -607,28 +636,23 @@ private fun DayScheduleGrid(
             items = periodLabels,
             key = {
                 it.first
+            },
+            contentType = {
+                "period_row"
             }
         ) { (period, startTime) ->
-
-            val cellCourses = courses
-                .filter { course ->
-                    course.periods.any {
-                        normalizePeriod(it) ==
-                                normalizePeriod(period)
-                    }
-                }
-                .distinctBy(::courseKey)
-
             DayPeriodRow(
                 period = period,
                 startTime = startTime,
-                courses = cellCourses,
-                onCourseClick =
-                    onCourseClick
+                courses = cells[period].orEmpty(),
+                onCourseClick = onCourseClick
             )
         }
 
-        item {
+        item(
+            key = "schedule_footer",
+            contentType = "spacer"
+        ) {
             Spacer(
                 modifier = Modifier.height(12.dp)
             )
@@ -652,22 +676,15 @@ private fun DayPeriodRow(
                 .height(88.dp)
                 .border(
                     width = 0.5.dp,
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .outlineVariant
+                    color = MaterialTheme.colorScheme.outlineVariant
                 )
                 .background(
-                    MaterialTheme
-                        .colorScheme
-                        .surfaceVariant
+                    MaterialTheme.colorScheme.surfaceVariant
                 ),
-            contentAlignment =
-                Alignment.Center
+            contentAlignment = Alignment.Center
         ) {
             Column(
-                horizontalAlignment =
-                    Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
                     text = period,
@@ -678,19 +695,13 @@ private fun DayPeriodRow(
                 Text(
                     text = "第$period 節",
                     fontSize = 9.sp,
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 Text(
                     text = startTime,
                     fontSize = 9.sp,
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -701,28 +712,20 @@ private fun DayPeriodRow(
                 .height(88.dp)
                 .border(
                     width = 0.5.dp,
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .outlineVariant
+                    color = MaterialTheme.colorScheme.outlineVariant
                 )
                 .padding(4.dp)
         ) {
             when {
                 courses.isEmpty() -> {
                     Box(
-                        modifier =
-                            Modifier.fillMaxSize(),
-                        contentAlignment =
-                            Alignment.CenterStart
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.CenterStart
                     ) {
                         Text(
                             text = "無課程",
                             fontSize = 11.sp,
-                            color =
-                                MaterialTheme
-                                    .colorScheme
-                                    .outline
+                            color = MaterialTheme.colorScheme.outline
                         )
                     }
                 }
@@ -731,38 +734,28 @@ private fun DayPeriodRow(
                     DayCourseCard(
                         course = courses.first(),
                         onClick = {
-                            onCourseClick(
-                                courses.first()
-                            )
+                            onCourseClick(courses.first())
                         },
-                        modifier =
-                            Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize()
                     )
                 }
 
                 else -> {
                     Row(
-                        modifier =
-                            Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxSize(),
                         horizontalArrangement =
                             Arrangement.spacedBy(4.dp)
                     ) {
-                        courses
-                            .take(2)
-                            .forEach { course ->
-
-                                DayCourseCard(
-                                    course = course,
-                                    onClick = {
-                                        onCourseClick(
-                                            course
-                                        )
-                                    },
-                                    compact = true,
-                                    modifier =
-                                        Modifier.weight(1f)
-                                )
-                            }
+                        courses.take(2).forEach { course ->
+                            DayCourseCard(
+                                course = course,
+                                onClick = {
+                                    onCourseClick(course)
+                                },
+                                compact = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
                 }
             }
@@ -777,26 +770,18 @@ private fun DayCourseCard(
     modifier: Modifier = Modifier,
     compact: Boolean = false
 ) {
-    val courseColor = courseColor(
-        courseKey(course)
-    )
+    val color = courseColor(courseKey(course))
 
     Card(
         modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick),
         colors = CardDefaults.cardColors(
-            containerColor =
-                courseColor.copy(
-                    alpha = 0.16f
-                )
+            containerColor = color.copy(alpha = 0.16f)
         ),
         border = BorderStroke(
             width = 1.dp,
-            color =
-                courseColor.copy(
-                    alpha = 0.65f
-                )
+            color = color.copy(alpha = 0.65f)
         )
     ) {
         Column(
@@ -806,27 +791,20 @@ private fun DayCourseCard(
                     horizontal = 8.dp,
                     vertical = 5.dp
                 ),
-            verticalArrangement =
-                Arrangement.Center
+            verticalArrangement = Arrangement.Center
         ) {
             Text(
                 text = course.courseName,
-                color = courseColor,
+                color = color,
                 fontWeight = FontWeight.Bold,
-                fontSize =
-                    if (compact) 10.sp
-                    else 13.sp,
-                maxLines =
-                    if (compact) 2
-                    else 1,
-                overflow =
-                    TextOverflow.Ellipsis
+                fontSize = if (compact) 10.sp else 13.sp,
+                maxLines = if (compact) 2 else 1,
+                overflow = TextOverflow.Ellipsis
             )
 
             if (!compact) {
                 Spacer(
-                    modifier =
-                        Modifier.height(2.dp)
+                    modifier = Modifier.height(2.dp)
                 )
 
                 Text(
@@ -835,18 +813,14 @@ private fun DayCourseCard(
                                 course.teacher,
                     fontSize = 11.sp,
                     maxLines = 1,
-                    overflow =
-                        TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis
                 )
 
                 Text(
                     text =
                         "${course.courseNo}｜${course.subjectCode}",
                     fontSize = 10.sp,
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1
                 )
             }
@@ -869,74 +843,52 @@ private fun RequiredCoursePanel(
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
-            verticalArrangement =
-                Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
                 text = "載入班級課程",
-                style =
-                    MaterialTheme
-                        .typography
-                        .titleMedium,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
 
             Text(
-                text =
-                    "選擇系所、年級與班級，載入公開課程資料。",
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodySmall,
-                color =
-                    MaterialTheme
-                        .colorScheme
-                        .onSurfaceVariant
+                text = "選擇系所、年級與班級，載入公開課程資料。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             if (state.isLoadingDepartments) {
                 Row(
-                    verticalAlignment =
-                        Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     CircularProgressIndicator(
-                        modifier =
-                            Modifier.size(22.dp),
+                        modifier = Modifier.size(22.dp),
                         strokeWidth = 2.dp
                     )
 
                     Spacer(
-                        modifier =
-                            Modifier.width(8.dp)
+                        modifier = Modifier.width(8.dp)
                     )
 
                     Text("正在讀取系所…")
                 }
-            } else if (
-                state.departments.isEmpty()
-            ) {
+            } else if (state.departments.isEmpty()) {
                 OutlinedButton(
-                    onClick =
-                        onRetryDepartments,
-                    modifier =
-                        Modifier.fillMaxWidth()
+                    onClick = onRetryDepartments,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("重新讀取系所")
                 }
             } else {
                 SimpleDropdown(
                     label = "系所",
-                    selectedText =
-                        state.departments
-                            .firstOrNull {
-                                it.code ==
-                                        state
-                                            .selectedDepartmentCode
-                            }
-                            ?.displayName
-                            .orEmpty(),
-                    options =
-                        state.departments,
+                    selectedText = state.departments
+                        .firstOrNull {
+                            it.code == state.selectedDepartmentCode
+                        }
+                        ?.displayName
+                        .orEmpty(),
+                    options = state.departments,
                     optionText = {
                         it.displayName
                     },
@@ -946,23 +898,19 @@ private fun RequiredCoursePanel(
                 )
 
                 Row(
-                    horizontalArrangement =
-                        Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Box(
-                        modifier =
-                            Modifier.weight(1f)
+                        modifier = Modifier.weight(1f)
                     ) {
                         SimpleDropdown(
                             label = "年級",
-                            selectedText =
-                                state.selectedGrade
-                                    ?.let {
-                                        "${it}年級"
-                                    }
-                                    .orEmpty(),
-                            options =
-                                (1..4).toList(),
+                            selectedText = state.selectedGrade
+                                ?.let {
+                                    "${it}年級"
+                                }
+                                .orEmpty(),
+                            options = (1..4).toList(),
                             optionText = {
                                 "${it}年級"
                             },
@@ -971,51 +919,38 @@ private fun RequiredCoursePanel(
                     }
 
                     Box(
-                        modifier =
-                            Modifier.weight(1f)
+                        modifier = Modifier.weight(1f)
                     ) {
                         SimpleDropdown(
                             label = "班級",
-                            selectedText =
-                                state.selectedClassName,
-                            options =
-                                ('A'..'Z')
-                                    .map(
-                                        Char::toString
-                                    ),
+                            selectedText = state.selectedClassName,
+                            options = ('A'..'Z').map(Char::toString),
                             optionText = {
                                 it
                             },
-                            onSelected =
-                                onClassName
+                            onSelected = onClassName
                         )
                     }
                 }
 
                 Button(
                     onClick = onLoad,
-                    enabled =
-                        !state.isLoadingCourses,
-                    modifier =
-                        Modifier.fillMaxWidth()
+                    enabled = !state.isLoadingCourses,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     if (state.isLoadingCourses) {
                         CircularProgressIndicator(
-                            modifier =
-                                Modifier.size(20.dp),
+                            modifier = Modifier.size(20.dp),
                             strokeWidth = 2.dp
                         )
 
                         Spacer(
-                            modifier =
-                                Modifier.width(8.dp)
+                            modifier = Modifier.width(8.dp)
                         )
                     }
 
                     Text(
-                        if (
-                            state.isLoadingCourses
-                        ) {
+                        if (state.isLoadingCourses) {
                             "載入中…"
                         } else {
                             "載入班級課程"
@@ -1025,6 +960,33 @@ private fun RequiredCoursePanel(
             }
         }
     }
+}
+
+@Composable
+private fun CourseSearchInputPanel(
+    viewModel: ScheduleViewModel,
+    loading: Boolean,
+    onQueryChange: (String) -> Unit,
+    onSearch: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val queryFlow = remember(viewModel) {
+        viewModel.uiState
+            .map { it.courseSearchQuery }
+            .distinctUntilChanged()
+    }
+
+    val query by queryFlow.collectAsStateWithLifecycle(
+        initialValue = viewModel.uiState.value.courseSearchQuery
+    )
+
+    CourseImportPanel(
+        query = query,
+        loading = loading,
+        onQueryChange = onQueryChange,
+        onSearch = onSearch,
+        modifier = modifier
+    )
 }
 
 @Composable
@@ -1040,69 +1002,47 @@ private fun CourseImportPanel(
     ) {
         Column(
             modifier = Modifier.padding(12.dp),
-            verticalArrangement =
-                Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
                 text = "搜尋並匯入課程",
-                style =
-                    MaterialTheme
-                        .typography
-                        .titleMedium,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
 
             Text(
-                text =
-                    "可輸入開課序號、科目代碼或課程名稱。",
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodySmall,
-                color =
-                    MaterialTheme
-                        .colorScheme
-                        .onSurfaceVariant
+                text = "可輸入開課序號、科目代碼或課程名稱。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             OutlinedTextField(
                 value = query,
-                onValueChange =
-                    onQueryChange,
+                onValueChange = onQueryChange,
                 label = {
-                    Text(
-                        "開課序號、科目代碼或名稱"
-                    )
+                    Text("開課序號、科目代碼或名稱")
                 },
                 placeholder = {
-                    Text(
-                        "例如：2246、V0024、LINUX"
-                    )
+                    Text("例如：2246、V0024、LINUX")
                 },
                 singleLine = true,
                 enabled = !loading,
-                modifier =
-                    Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth()
             )
 
             Button(
                 onClick = onSearch,
-                enabled =
-                    !loading &&
-                            query.isNotBlank(),
-                modifier =
-                    Modifier.fillMaxWidth()
+                enabled = !loading && query.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
             ) {
                 if (loading) {
                     CircularProgressIndicator(
-                        modifier =
-                            Modifier.size(20.dp),
+                        modifier = Modifier.size(20.dp),
                         strokeWidth = 2.dp
                     )
 
                     Spacer(
-                        modifier =
-                            Modifier.width(8.dp)
+                        modifier = Modifier.width(8.dp)
                     )
                 }
 
@@ -1120,10 +1060,7 @@ private fun CourseImportPanel(
                     text =
                         "第一次搜尋需要讀取全校公開課程，請稍候。",
                     fontSize = 11.sp,
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .primary
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
         }
@@ -1138,9 +1075,7 @@ private fun ManagementCourseCard(
     onRemove: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val color = courseColor(
-        courseKey(course)
-    )
+    val color = courseColor(courseKey(course))
 
     Card(
         modifier = modifier
@@ -1149,8 +1084,7 @@ private fun ManagementCourseCard(
     ) {
         Row(
             modifier = Modifier.padding(10.dp),
-            verticalAlignment =
-                Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
@@ -1181,18 +1115,14 @@ private fun ManagementCourseCard(
                         "${course.classroom.ifBlank { "教室未公告" }}｜" +
                                 course.teacher,
                     maxLines = 1,
-                    overflow =
-                        TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis
                 )
 
                 Text(
                     text =
                         "${course.courseNo}｜${course.subjectCode}｜" +
                                 course.requiredText,
-                    style =
-                        MaterialTheme
-                            .typography
-                            .bodySmall
+                    style = MaterialTheme.typography.bodySmall
                 )
             }
 
@@ -1220,8 +1150,7 @@ private fun SearchResultDialog(
         },
         text = {
             LazyColumn(
-                verticalArrangement =
-                    Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(
                     items = results,
@@ -1229,9 +1158,7 @@ private fun SearchResultDialog(
                         it.key
                     }
                 ) { offering ->
-
-                    val course =
-                        offering.primary
+                    val course = offering.primary
 
                     Card(
                         modifier = Modifier
@@ -1239,35 +1166,27 @@ private fun SearchResultDialog(
                             .clickable {
                                 onChoose(offering)
                             },
-                        colors =
-                            CardDefaults.cardColors(
-                                containerColor =
-                                    MaterialTheme
-                                        .colorScheme
-                                        .surfaceVariant
-                            )
+                        colors = CardDefaults.cardColors(
+                            containerColor =
+                                MaterialTheme.colorScheme.surfaceVariant
+                        )
                     ) {
                         Column(
-                            modifier =
-                                Modifier.padding(10.dp),
+                            modifier = Modifier.padding(10.dp),
                             verticalArrangement =
                                 Arrangement.spacedBy(3.dp)
                         ) {
                             Text(
-                                text =
-                                    course.courseName,
-                                fontWeight =
-                                    FontWeight.Bold
+                                text = course.courseName,
+                                fontWeight = FontWeight.Bold
                             )
 
                             Text(
-                                text =
-                                    "開課序號：${course.courseNo}"
+                                text = "開課序號：${course.courseNo}"
                             )
 
                             Text(
-                                text =
-                                    "科目代碼：${course.subjectCode}"
+                                text = "科目代碼：${course.subjectCode}"
                             )
 
                             Text(
@@ -1278,8 +1197,7 @@ private fun SearchResultDialog(
                             )
 
                             Text(
-                                text =
-                                    "教師：${course.teacher}"
+                                text = "教師：${course.teacher}"
                             )
 
                             Text(
@@ -1289,14 +1207,9 @@ private fun SearchResultDialog(
                             )
 
                             Text(
-                                text =
-                                    offering.scheduleText,
-                                color =
-                                    MaterialTheme
-                                        .colorScheme
-                                        .primary,
-                                fontWeight =
-                                    FontWeight.Medium
+                                text = offering.scheduleText,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium
                             )
 
                             Text(
@@ -1333,8 +1246,7 @@ private fun CourseDetailDialog(
         },
         text = {
             Column(
-                verticalArrangement =
-                    Arrangement.spacedBy(5.dp)
+                verticalArrangement = Arrangement.spacedBy(5.dp)
             ) {
                 DetailRow(
                     label = "開課序號",
@@ -1375,10 +1287,9 @@ private fun CourseDetailDialog(
 
                 DetailRow(
                     label = "教室",
-                    value =
-                        course.classroom.ifBlank {
-                            "未公告"
-                        }
+                    value = course.classroom.ifBlank {
+                        "未公告"
+                    }
                 )
             }
         },
@@ -1396,10 +1307,7 @@ private fun CourseDetailDialog(
                 ) {
                     Text(
                         text = "移除課程",
-                        color =
-                            MaterialTheme
-                                .colorScheme
-                                .error
+                        color = MaterialTheme.colorScheme.error
                     )
                 }
             }
@@ -1419,28 +1327,19 @@ private fun EmptySchedule(
         contentAlignment = Alignment.Center
     ) {
         Column(
-            horizontalAlignment =
-                Alignment.CenterHorizontally,
-            verticalArrangement =
-                Arrangement.spacedBy(8.dp),
-            modifier =
-                Modifier.padding(24.dp)
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(24.dp)
         ) {
             Text(
                 text = title,
-                style =
-                    MaterialTheme
-                        .typography
-                        .titleMedium,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
 
             Text(
                 text = message,
-                color =
-                    MaterialTheme
-                        .colorScheme
-                        .onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             OutlinedButton(
@@ -1471,43 +1370,69 @@ private fun <T> SimpleDropdown(
             onClick = {
                 expanded = true
             },
-            modifier =
-                Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth()
         ) {
             Text(
-                text =
-                    if (selectedText.isBlank()) {
-                        "請選擇$label"
-                    } else {
-                        selectedText
-                    },
+                text = if (selectedText.isBlank()) {
+                    "請選擇$label"
+                } else {
+                    selectedText
+                },
                 maxLines = 1,
-                overflow =
-                    TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis
             )
         }
 
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = {
-                expanded = false
-            },
-            modifier = Modifier.widthIn(
-                min = 220.dp,
-                max = 360.dp
-            )
-        ) {
-            options.forEach { option ->
-                DropdownMenuItem(
-                    text = {
-                        Text(optionText(option))
-                    },
-                    onClick = {
-                        onSelected(option)
-                        expanded = false
+        if (expanded) {
+            AlertDialog(
+                onDismissRequest = {
+                    expanded = false
+                },
+                title = {
+                    Text("選擇$label")
+                },
+                text = {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                    ) {
+                        items(
+                            count = options.size,
+                            key = {
+                                it
+                            },
+                            contentType = {
+                                "selector_option"
+                            }
+                        ) { index ->
+                            val option = options[index]
+
+                            TextButton(
+                                onClick = {
+                                    onSelected(option)
+                                    expanded = false
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = optionText(option),
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                     }
-                )
-            }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            expanded = false
+                        }
+                    ) {
+                        Text("取消")
+                    }
+                }
+            )
         }
     }
 }
@@ -1576,23 +1501,22 @@ private fun courseKey(
     }
 }
 
+private val coursePalette = listOf(
+    Color(0xFF1565C0),
+    Color(0xFF00897B),
+    Color(0xFF7B1FA2),
+    Color(0xFFEF6C00),
+    Color(0xFFC62828),
+    Color(0xFF2E7D32),
+    Color(0xFF6A1B9A),
+    Color(0xFF0277BD)
+)
+
 private fun courseColor(
     seed: String
 ): Color {
-    val colors = listOf(
-        Color(0xFF1565C0),
-        Color(0xFF00897B),
-        Color(0xFF7B1FA2),
-        Color(0xFFEF6C00),
-        Color(0xFFC62828),
-        Color(0xFF2E7D32),
-        Color(0xFF6A1B9A),
-        Color(0xFF0277BD)
-    )
-
     val index =
-        (seed.hashCode() and Int.MAX_VALUE) %
-                colors.size
+        (seed.hashCode() and Int.MAX_VALUE) % coursePalette.size
 
-    return colors[index]
+    return coursePalette[index]
 }

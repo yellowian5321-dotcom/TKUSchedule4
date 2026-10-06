@@ -1,8 +1,19 @@
 package com.example.tkuschedule
 
 import android.os.Bundle
+import android.os.Build
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.result.contract.ActivityResultContracts
+import com.example.tkuschedule.reminder.ClassReminderScheduler
+import com.example.tkuschedule.reminder.ClassReminderNotifier
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import android.util.Log
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
+import android.widget.FrameLayout
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,165 +36,139 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.example.tkuschedule.location.NextClassCalculator
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collect
+import com.example.tkuschedule.data.Course
 import com.example.tkuschedule.ai.AiAssistantScreen
-import com.example.tkuschedule.assistant.FloatingCatAssistant
+import com.example.tkuschedule.assistant.FloatingCatAssistantController
 import com.example.tkuschedule.ui.schedule.ScheduleScreen
 import com.example.tkuschedule.ui.schedule.ScheduleViewModel
 
 class MainActivity : ComponentActivity() {
+    private lateinit var catController: FloatingCatAssistantController
+    private lateinit var scheduleViewModel: ScheduleViewModel
+    private val showAiAssistant = mutableStateOf(false)
+    private var lastReminderKey: String? = null
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> if (granted) refreshPhoneReminders(force = true) }
 
-    override fun onCreate(
-        savedInstanceState: Bundle?
-    ) {
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        setContent {
-            MaterialTheme {
-                /*
-                 * 課表、AI 與小貓共用
-                 * 同一個 ScheduleViewModel。
-                 */
-                val scheduleViewModel:
-                        ScheduleViewModel =
-                    viewModel()
-
-                val scheduleState by
-                scheduleViewModel
-                    .uiState
-                    .collectAsStateWithLifecycle()
-
-                /*
-                 * 控制 AI 對話頁面是否開啟。
-                 */
-                var showAiAssistant by remember {
-                    mutableStateOf(false)
-                }
-
-                Surface(
-                    modifier =
-                        Modifier.fillMaxSize(),
-
-                    color =
-                        MaterialTheme
-                            .colorScheme
-                            .background
-                ) {
-                    Box(
-                        modifier =
-                            Modifier.fillMaxSize()
-                    ) {
-                        /*
-                         * 原本的課程管理與格子課表。
-                         */
-                        ScheduleScreen(
-                            viewModel =
-                                scheduleViewModel
-                        )
-
-                        /*
-                         * 浮動小貓助理。
-                         *
-                         * courses：
-                         * 傳入目前已匯入的課程，
-                         * 讓小貓計算下一堂課。
-                         *
-                         * walkingMinutes：
-                         * 目前尚未接入定位結果，
-                         * 所以暫時傳入 null。
-                         */
-                        FloatingCatAssistant(
-                            courses =
-                                scheduleState
-                                    .courses,
-
-                            modifier =
-                                Modifier
-                                    .fillMaxSize(),
-
-                            walkingMinutes =
-                                null,
-
-                            onCatClick = {
-                                /*
-                                 * 點擊小貓後，
-                                 * 開啟 Gemini AI。
-                                 */
-                                showAiAssistant =
-                                    true
-                            }
-                        )
-
-                        /*
-                         * AI 對話頁面。
-                         */
-                        if (showAiAssistant) {
-                            Dialog(
-                                onDismissRequest = {
-                                    showAiAssistant =
-                                        false
-                                },
-
-                                properties =
-                                    DialogProperties(
-                                        usePlatformDefaultWidth =
-                                            false,
-
-                                        decorFitsSystemWindows =
-                                            false
-                                    )
-                            ) {
-                                Surface(
-                                    modifier =
-                                        Modifier
-                                            .fillMaxSize(),
-
-                                    color =
-                                        MaterialTheme
-                                            .colorScheme
-                                            .background
-                                ) {
-                                    Column(
-                                        modifier =
-                                            Modifier
-                                                .fillMaxSize()
-                                    ) {
-                                        /*
-                                         * AI 對話頁上方標題列。
-                                         */
-                                        AiAssistantTopBar(
-                                            courseCount =
-                                                countUniqueCourses(
-                                                    scheduleState
-                                                        .courses
-                                                ),
-
-                                            onClose = {
-                                                showAiAssistant =
-                                                    false
-                                            }
-                                        )
-
-                                        /*
-                                         * AI 對話內容。
-                                         */
-                                        Box(
-                                            modifier =
-                                                Modifier
-                                                    .weight(1f)
-                                                    .fillMaxWidth()
-                                        ) {
-                                            AiAssistantScreen(
-                                                courses =
-                                                    scheduleState
-                                                        .courses
-                                            )
-                                        }
-                                    }
-                                }
+        scheduleViewModel = ViewModelProvider(this)[ScheduleViewModel::class.java]
+        val root = FrameLayout(this)
+        val composeView = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                MaterialTheme {
+                    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        Box(Modifier.fillMaxSize()) {
+                            ScheduleScreen(viewModel = scheduleViewModel)
+                            if (showAiAssistant.value) {
+                                AiAssistantDialog(scheduleViewModel) { showAiAssistant.value = false }
                             }
                         }
                     }
+                }
+            }
+        }
+        root.addView(composeView, FrameLayout.LayoutParams(-1, -1))
+        val overlay = FrameLayout(this).apply {
+            isClickable = false
+            isFocusable = false
+            clipChildren = false
+            clipToPadding = false
+        }
+        root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
+        setContentView(root)
+        // 原生小貓移動不會讓 Compose 課表跟著重組。
+        catController = FloatingCatAssistantController(
+            activity = this, overlayContainer = overlay,
+            onOpenAssistant = { showAiAssistant.value = true }
+        )
+        ClassReminderNotifier.createChannel(this)
+        requestNotificationPermissionOnce()
+        // 新 Activity 啟動時補回可能被強制停止或系統清除的 PendingIntent。
+        refreshPhoneReminders(force = true)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                scheduleViewModel.uiState.map { it.courses }.distinctUntilChanged().collect { courses ->
+                    if (scheduleViewModel.uiState.value.isRestoringSchedule) return@collect
+                    val next = NextClassCalculator.findNextClass(courses)
+                    if (next == null) {
+                        lastReminderKey = null
+                        return@collect
+                    }
+                    val key = "${next.course.id}|${next.startDateTime}"
+                    if (key != lastReminderKey) {
+                        catController.showReminder("下一堂是「${next.courseName}」\n${next.startDateTime.toLocalDate()} ${next.startTimeText}｜${next.classroom}")
+                        lastReminderKey = key
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        catController.resume()
+        refreshPhoneReminders()
+    }
+
+    override fun onPause() {
+        catController.pause()
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        catController.destroy()
+        super.onDestroy()
+    }
+
+    private fun requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED) return
+        val prefs = getSharedPreferences("tku_reminder_permission", MODE_PRIVATE)
+        if (!prefs.getBoolean("asked", false)) {
+            prefs.edit().putBoolean("asked", true).apply()
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun refreshPhoneReminders(force: Boolean = false) {
+        val appContext = applicationContext
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                try {
+                    ClassReminderScheduler.refresh(appContext, force)
+                } catch (error: Exception) {
+                    Log.e("ClassReminder", "無法更新提醒排程", error)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiAssistantDialog(scheduleViewModel: ScheduleViewModel, onClose: () -> Unit) {
+    // 只在開啟 AI 對話時讀取完整課表狀態，首頁不跟著輸入欄位更新。
+    val state by scheduleViewModel.uiState.collectAsStateWithLifecycle()
+    val count = remember(state.courses) { countUniqueCourses(state.courses) }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(
+        usePlatformDefaultWidth = false, decorFitsSystemWindows = false
+    )) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize()) {
+                AiAssistantTopBar(count, onClose)
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    AiAssistantScreen(courses = state.courses)
                 }
             }
         }

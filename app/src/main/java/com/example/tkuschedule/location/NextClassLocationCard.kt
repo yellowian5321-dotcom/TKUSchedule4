@@ -3,437 +3,93 @@ package com.example.tkuschedule.location
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.tkuschedule.data.Course
-import kotlin.math.abs
+import kotlinx.coroutines.awaitCancellation
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun NextClassLocationCard(
     courses: List<Course>,
     modifier: Modifier = Modifier,
-    viewModel:
-    NextClassLocationViewModel =
-        viewModel()
+    viewModel: NextClassLocationViewModel = viewModel()
 ) {
-    val state by viewModel
-        .uiState
-        .collectAsStateWithLifecycle()
-
-    val permissionLauncher =
-        rememberLauncherForActivityResult(
-            contract =
-                ActivityResultContracts
-                    .RequestMultiplePermissions()
-        ) { permissions ->
-
-            val fineLocationGranted =
-                permissions[
-                    Manifest.permission
-                        .ACCESS_FINE_LOCATION
-                ] == true
-
-            val coarseLocationGranted =
-                permissions[
-                    Manifest.permission
-                        .ACCESS_COARSE_LOCATION
-                ] == true
-
-            viewModel
-                .onLocationPermissionResult(
-                    granted =
-                        fineLocationGranted ||
-                                coarseLocationGranted,
-                    courses = courses
-                )
-        }
-
-    LaunchedEffect(courses) {
-        viewModel.refresh(courses)
-    }
-
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor =
-                MaterialTheme
-                    .colorScheme
-                    .surfaceVariant
-                    .copy(alpha = 0.55f)
-        ),
-        border = BorderStroke(
-            width = 1.dp,
-            color =
-                MaterialTheme
-                    .colorScheme
-                    .outlineVariant
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val owner = LocalLifecycleOwner.current
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        viewModel.onLocationPermissionResult(
+            it[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                    it[Manifest.permission.ACCESS_COARSE_LOCATION] == true, courses
         )
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement =
-                Arrangement.spacedBy(8.dp)
-        ) {
-            Text(
-                text = "下一堂課與步行時間",
-                style =
-                    MaterialTheme
-                        .typography
-                        .titleMedium,
-                fontWeight = FontWeight.Bold
-            )
-
-            when {
-                state.isLoading -> {
-                    LoadingContent()
-                }
-
-                state.needsLocationPermission -> {
-                    LocationPermissionContent(
-                        message =
-                            state.errorMessage
-                                ?: "需要位置權限",
-                        onRequestPermission = {
-                            permissionLauncher
-                                .launch(
-                                    arrayOf(
-                                        Manifest.permission
-                                            .ACCESS_FINE_LOCATION,
-                                        Manifest.permission
-                                            .ACCESS_COARSE_LOCATION
-                                    )
-                                )
-                        }
-                    )
-                }
-
-                state.hasResult -> {
-                    LocationResultContent(
-                        state = state,
-                        onRefresh = {
-                            viewModel.refresh(
-                                courses
-                            )
-                        }
-                    )
-                }
-
-                else -> {
-                    ErrorContent(
-                        message =
-                            state.errorMessage
-                                ?: "尚未取得下一堂課資訊",
-                        onRetry = {
-                            viewModel.refresh(
-                                courses
-                            )
-                        }
-                    )
-                }
+    }
+    LaunchedEffect(courses, owner) {
+        owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            try {
+                viewModel.refresh(courses)
+                awaitCancellation()
+            } finally {
+                viewModel.cancelRefresh()
             }
         }
     }
-}
-
-@Composable
-private fun LoadingContent() {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 16.dp),
-        verticalAlignment =
-            Alignment.CenterVertically,
-        horizontalArrangement =
-            Arrangement.Center
-    ) {
-        CircularProgressIndicator()
-
-        Spacer(
-            modifier = Modifier.padding(6.dp)
-        )
-
-        Text(
-            text = "正在計算下一堂課與步行時間…"
-        )
-    }
-}
-
-@Composable
-private fun LocationPermissionContent(
-    message: String,
-    onRequestPermission: () -> Unit
-) {
-    Text(
-        text = message,
-        style =
-            MaterialTheme
-                .typography
-                .bodyMedium,
-        color =
-            MaterialTheme
-                .colorScheme
-                .onSurfaceVariant
-    )
-
-    Button(
-        onClick = onRequestPermission,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text("允許位置並開始計算")
-    }
-}
-
-@Composable
-private fun LocationResultContent(
-    state: NextClassLocationUiState,
-    onRefresh: () -> Unit
-) {
-    val nextClass =
-        state.nextClass
-            ?: return
-
-    val destination =
-        state.destination
-            ?: return
-
-    val walkingEstimate =
-        state.walkingEstimate
-            ?: return
-
-    InformationRow(
-        label = "課程",
-        value = nextClass.courseName
-    )
-
-    InformationRow(
-        label = "教師",
-        value = nextClass.teacher
-    )
-
-    InformationRow(
-        label = "上課時間",
-        value =
-            nextClass.startTimeText
-    )
-
-    InformationRow(
-        label = "教室",
-        value =
-            destination.displayName
-    )
-
-    InformationRow(
-        label = "原始教室資料",
-        value =
-            destination.originalClassroom
-    )
-
-    InformationRow(
-        label = "距離上課",
-        value =
-            formatRemainingTime(
-                nextClass.minutesUntilClass
-            )
-    )
-
-    InformationRow(
-        label = "預估距離",
-        value =
-            formatDistance(
-                walkingEstimate
-                    .distanceMeters
-            )
-    )
-
-    InformationRow(
-        label = "步行時間",
-        value =
-            "${walkingEstimate.walkingMinutes} 分鐘"
-    )
-
-    Spacer(
-        modifier = Modifier.height(2.dp)
-    )
-
-    ArrivalSuggestion(
-        estimate = walkingEstimate
-    )
-
-    OutlinedButton(
-        onClick = onRefresh,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text("重新取得位置並計算")
-    }
-}
-
-@Composable
-private fun InformationRow(
-    label: String,
-    value: String
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement =
-            Arrangement.spacedBy(8.dp)
-    ) {
-        Text(
-            text = "$label：",
-            fontWeight = FontWeight.Bold,
-            modifier =
-                Modifier.weight(0.35f)
-        )
-
-        Text(
-            text = value,
-            modifier =
-                Modifier.weight(0.65f)
-        )
-    }
-}
-
-@Composable
-private fun ArrivalSuggestion(
-    estimate: WalkingEstimate
-) {
-    val backgroundColor: Color
-    val textColor: Color
-    val message: String
-
-    if (estimate.canArriveOnTime) {
-        backgroundColor =
-            Color(0xFFE8F5E9)
-
-        textColor =
-            Color(0xFF1B5E20)
-
-        message =
-            when {
-                estimate
-                    .suggestedDepartureMinutes <= 3 -> {
-                    "建議現在出發，避免遲到。"
-                }
-
-                else -> {
-                    "目前還來得及，建議在 " +
-                            "${estimate.suggestedDepartureMinutes} " +
-                            "分鐘內出發。"
-                }
+    Card(modifier.fillMaxWidth(), colors = CardDefaults.cardColors(
+        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+    )) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("下一堂課", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                TextButton(enabled = !state.isLoading && courses.isNotEmpty(), onClick = {
+                    if (state.needsLocationPermission) permission.launch(arrayOf(
+                        Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION
+                    )) else viewModel.refresh(courses, force = true)
+                }) { Text(if (state.needsLocationPermission) "允許定位" else "重新定位") }
             }
-    } else {
-        backgroundColor =
-            Color(0xFFFFEBEE)
-
-        textColor =
-            Color(0xFFB71C1C)
-
-        message =
-            "依照目前位置，預估可能遲到 " +
-                    "${abs(estimate.suggestedDepartureMinutes)} " +
-                    "分鐘，建議立即出發。"
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor =
-                backgroundColor
-        )
-    ) {
-        Text(
-            text = message,
-            color = textColor,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.padding(12.dp)
-        )
-    }
-}
-
-@Composable
-private fun ErrorContent(
-    message: String,
-    onRetry: () -> Unit
-) {
-    Text(
-        text = message,
-        color =
-            MaterialTheme
-                .colorScheme
-                .error
-    )
-
-    OutlinedButton(
-        onClick = onRetry,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Text("重新嘗試")
-    }
-}
-
-private fun formatDistance(
-    distanceMeters: Int
-): String {
-    return if (distanceMeters < 1000) {
-        "$distanceMeters 公尺"
-    } else {
-        String.format(
-            "%.1f 公里",
-            distanceMeters / 1000.0
-        )
-    }
-}
-
-private fun formatRemainingTime(
-    minutes: Long
-): String {
-    if (minutes < 60) {
-        return "$minutes 分鐘"
-    }
-
-    val days = minutes / (24 * 60)
-    val remainingAfterDays =
-        minutes % (24 * 60)
-
-    val hours =
-        remainingAfterDays / 60
-
-    val remainingMinutes =
-        remainingAfterDays % 60
-
-    return buildString {
-        if (days > 0) {
-            append("${days}天 ")
+            state.nextClass?.let { next ->
+                Text(next.courseName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Text("${next.startDateTime.format(DateTimeFormatter.ofPattern("M/d HH:mm"))}  ·  ${next.classroom}",
+                    style = MaterialTheme.typography.bodyMedium)
+            }
+            when {
+                state.isLoading -> Row(verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Text("正在估算步行時間…", style = MaterialTheme.typography.bodySmall)
+                }
+                state.walkingEstimate != null && state.nextClass != null -> {
+                    val estimate = requireNotNull(state.walkingEstimate)
+                    val departure = requireNotNull(state.nextClass).startDateTime
+                        .minusMinutes(estimate.walkingMinutes.toLong()).format(DateTimeFormatter.ofPattern("HH:mm"))
+                    Text("步行約 ${estimate.walkingMinutes} 分鐘  ·  建議 $departure 出發",
+                        style = MaterialTheme.typography.bodyMedium)
+                    if (!estimate.canArriveOnTime) Text("時間有點趕，請儘快出發",
+                        color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                else -> Text(state.errorMessage ?: "匯入課表後可查看下一堂課",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
-
-        if (hours > 0) {
-            append("${hours}小時 ")
-        }
-
-        if (remainingMinutes > 0) {
-            append("${remainingMinutes}分鐘")
-        }
-    }.trim()
+    }
 }

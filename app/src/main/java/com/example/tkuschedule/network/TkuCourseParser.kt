@@ -2,16 +2,55 @@ package com.example.tkuschedule.network
 
 import com.example.tkuschedule.data.Course
 import com.example.tkuschedule.data.Department
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.coroutineContext
 
-class TkuCourseParser {
+data class CourseSearchResult(
+    val courses: List<Course>,
+    val failedDepartments: List<Department>
+) {
+    val isComplete: Boolean
+        get() = failedDepartments.isEmpty()
+}
+
+class TkuCourseParser internal constructor(
+    private val client: OkHttpClient,
+    private val indexUrl: String,
+    private val courseBaseUrl: String,
+    private val retryDelayMillis: Long
+) {
+    constructor() : this(
+        client = OkHttpClient.Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .callTimeout(35, TimeUnit.SECONDS)
+            .build(),
+        indexUrl = INDEX_URL,
+        courseBaseUrl = COURSE_BASE_URL,
+        retryDelayMillis = 1_000L
+    )
 
     companion object {
         private const val INDEX_URL =
@@ -21,10 +60,10 @@ class TkuCourseParser {
             "https://esquery.tku.edu.tw/acad/upload/data"
     }
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
-        .build()
+    private val departmentMutex = Mutex()
+    private val catalogMutex = Mutex()
+    private val pageCache = DepartmentPageCache<List<Course>>()
+    private val downloads = Semaphore(4)
 
     @Volatile
     private var departmentCache: List<Department>? = null
@@ -34,10 +73,15 @@ class TkuCourseParser {
 
     suspend fun fetchDepartments(): List<Department> =
         withContext(Dispatchers.IO) {
-            departmentCache
-                ?: parseDepartments(getText(INDEX_URL)).also {
-                    departmentCache = it
-                }
+            departmentMutex.withLock {
+                departmentCache
+                    ?: parseDepartments(getText(indexUrl)).also {
+                        check(it.isNotEmpty()) {
+                            "無法讀取系所清單，請稍後重試"
+                        }
+                        departmentCache = it
+                    }
+            }
         }
 
     suspend fun fetchCourses(
@@ -45,7 +89,6 @@ class TkuCourseParser {
         grade: Int? = null,
         className: String? = null
     ): List<Course> = withContext(Dispatchers.IO) {
-
         val department = fetchDepartments()
             .firstOrNull { it.code == departmentCode }
             ?: Department(
@@ -53,7 +96,7 @@ class TkuCourseParser {
                 name = departmentCode
             )
 
-        parseCoursePage(department).filter { course ->
+        fetchDepartmentCourses(department).filter { course ->
             (grade == null || course.grade == grade) &&
                     (
                             className.isNullOrBlank() ||
@@ -62,23 +105,49 @@ class TkuCourseParser {
         }
     }
 
+    // 保留原本只回傳 List 的呼叫介面。
     suspend fun searchCourses(
         query: String,
         maxResults: Int = 120
-    ): List<Course> = withContext(Dispatchers.IO) {
+    ): List<Course> {
+        val result = searchCoursesDetailed(query, maxResults)
 
+        if (!result.isComplete) {
+            throw IOException(
+                "部分系所課程下載失敗，請稍後重新搜尋"
+            )
+        }
+
+        return result.courses
+    }
+
+    // 畫面使用這個介面，取得課程及資料完整性。
+    suspend fun searchCoursesDetailed(
+        query: String,
+        maxResults: Int = 120
+    ): CourseSearchResult = withContext(Dispatchers.IO) {
         val keyword = normalize(query)
 
         require(keyword.isNotBlank()) {
             "請輸入開課序號、科目代碼或課程名稱"
         }
 
-        val catalog = allCoursesCache
-            ?: buildCatalog().also {
-                allCoursesCache = it
+        val catalog = catalogMutex.withLock {
+            allCoursesCache?.let {
+                CatalogSnapshot(
+                    courses = it,
+                    failedDepartments = emptyList()
+                )
+            } ?: buildCatalog().also { snapshot ->
+                // 只有全部下載成功，才快取為完整目錄。
+                if (snapshot.failedDepartments.isEmpty()) {
+                    allCoursesCache = snapshot.courses
+                }
             }
+        }
 
-        catalog.asSequence()
+        val matches = catalog.courses
+            .asSequence()
             .filter { course ->
                 normalize(course.courseNo).contains(keyword) ||
                         normalize(course.subjectCode).contains(keyword) ||
@@ -98,34 +167,62 @@ class TkuCourseParser {
             )
             .take(maxResults)
             .toList()
+
+        CourseSearchResult(
+            courses = matches,
+            failedDepartments = catalog.failedDepartments
+        )
     }
 
-    private fun buildCatalog(): List<Course> {
-        val departments = departmentCache
-            ?: parseDepartments(getText(INDEX_URL)).also {
-                departmentCache = it
+    private suspend fun fetchDepartmentCourses(
+        department: Department
+    ): List<Course> =
+        pageCache.get(department.code) {
+            downloads.withPermit {
+                parseCoursePage(department)
             }
+        }
 
-        return departments
-            .flatMap { department ->
-                runCatching {
-                    parseCoursePage(department)
-                }.getOrDefault(emptyList())
-            }
-            .distinctBy { it.id }
-    }
+    private suspend fun buildCatalog(): CatalogSnapshot =
+        coroutineScope {
+            val departments = fetchDepartments()
+
+            val results = departments.map { department ->
+                async {
+                    try {
+                        Result.success(
+                            fetchDepartmentCourses(department)
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        Result.failure<List<Course>>(error)
+                    }
+                }
+            }.awaitAll()
+
+            // 部分失敗時，仍保留成功取得的課程。
+            CatalogSnapshot(
+                courses = results
+                    .flatMap { it.getOrNull().orEmpty() }
+                    .distinctBy { it.id },
+
+                failedDepartments = departments.filterIndexed {
+                        index, _ ->
+                    results[index].isFailure
+                }
+            )
+        }
 
     private fun parseDepartments(
         html: String
     ): List<Department> {
-
         val optionRegex =
             Regex("""new\s+Option\("([^"]+)"""")
 
         return optionRegex
             .findAll(html)
             .mapNotNull { match ->
-
                 val text = match.groupValues[1].trim()
                 val separator = text.indexOf('_')
 
@@ -154,12 +251,11 @@ class TkuCourseParser {
             .toList()
     }
 
-    private fun parseCoursePage(
+    private suspend fun parseCoursePage(
         department: Department
     ): List<Course> {
-
         val url =
-            "$COURSE_BASE_URL/${department.code}.htm"
+            "$courseBaseUrl/${department.code}.htm"
 
         val document = Jsoup.parse(
             getText(url),
@@ -172,6 +268,7 @@ class TkuCourseParser {
         var previousBaseCourse: BaseCourse? = null
 
         document.select("tr").forEach rowLoop@{ row ->
+            coroutineContext.ensureActive()
 
             val cells = row.select("td")
 
@@ -185,7 +282,6 @@ class TkuCourseParser {
 
             val baseCourse =
                 if (courseNo.isNotBlank()) {
-
                     BaseCourse(
                         grade = cells[0]
                             .text()
@@ -238,7 +334,6 @@ class TkuCourseParser {
             )
 
             meetingColumns.forEach meetingLoop@{ meetingText ->
-
                 val meeting = parseMeeting(meetingText)
                     ?: return@meetingLoop
 
@@ -304,7 +399,6 @@ class TkuCourseParser {
     private fun parseMeeting(
         raw: String
     ): Meeting? {
-
         val parts = raw
             .split('/')
             .map { it.clean() }
@@ -345,32 +439,92 @@ class TkuCourseParser {
         )
     }
 
-    private fun getText(
+    private suspend fun getText(
         url: String
     ): String {
+        // 暫時性錯誤，程式最多額外重試一次。
+        repeat(2) { attempt ->
+            coroutineContext.ensureActive()
 
-        val request = Request.Builder()
-            .url(url)
-            .header(
-                "User-Agent",
-                "TKUSchedule/1.0"
-            )
-            .build()
-
-        client.newCall(request)
-            .execute()
-            .use { response ->
-
-                if (!response.isSuccessful) {
-                    error(
-                        "讀取課程資料失敗（HTTP ${response.code}）"
+            try {
+                return getTextOnce(url)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: IOException) {
+                val retryable =
+                    error !is CourseHttpException ||
+                            error.statusCode in setOf(
+                        408,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504
                     )
+
+                if (attempt == 1 || !retryable) {
+                    throw error
                 }
 
-                return response.body
-                    ?.string()
-                    ?: error("課程資料內容為空")
+                delay(retryDelayMillis)
             }
+        }
+
+        error("Unreachable retry state")
+    }
+
+    private suspend fun getTextOnce(
+        url: String
+    ): String {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "TKUSchedule/1.0")
+            .build()
+
+        return suspendCancellableCoroutine { continuation ->
+            val call = client.newCall(request)
+
+            continuation.invokeOnCancellation {
+                call.cancel()
+            }
+
+            call.enqueue(object : Callback {
+                override fun onFailure(
+                    call: Call,
+                    error: IOException
+                ) {
+                    if (continuation.isActive) {
+                        continuation.resumeWith(
+                            Result.failure(error)
+                        )
+                    }
+                }
+
+                override fun onResponse(
+                    call: Call,
+                    response: Response
+                ) {
+                    val result = response.use {
+                        if (!continuation.isActive) {
+                            return
+                        }
+
+                        runCatching {
+                            if (!it.isSuccessful) {
+                                throw CourseHttpException(it.code)
+                            }
+
+                            it.body?.string()
+                                ?: error("課程資料內容為空")
+                        }
+                    }
+
+                    if (continuation.isActive) {
+                        continuation.resumeWith(result)
+                    }
+                }
+            })
+        }
     }
 
     private fun String.clean(): String {
@@ -395,6 +549,17 @@ class TkuCourseParser {
         val required: Boolean,
         val credits: Double,
         val courseName: String
+    )
+
+    private data class CatalogSnapshot(
+        val courses: List<Course>,
+        val failedDepartments: List<Department>
+    )
+
+    private class CourseHttpException(
+        val statusCode: Int
+    ) : IOException(
+        "讀取課程資料失敗（HTTP $statusCode）"
     )
 
     private data class Meeting(

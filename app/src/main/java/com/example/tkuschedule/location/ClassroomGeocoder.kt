@@ -2,6 +2,10 @@ package com.example.tkuschedule.location
 
 import android.content.Context
 import android.location.Geocoder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -9,6 +13,8 @@ import java.util.Locale
 class ClassroomGeocoder(
     context: Context
 ) {
+    private val coordinates = ConcurrentHashMap<String, GeoPoint>()
+
     private val applicationContext =
         context.applicationContext
 
@@ -25,7 +31,9 @@ class ClassroomGeocoder(
         return withContext(
             Dispatchers.IO
         ) {
-            runCatching {
+            try {
+                val key = "${destination.buildingCode}|${destination.searchQuery}"
+                coordinates[key]?.let { return@withContext Result.success(it) }
                 if (!Geocoder.isPresent()) {
                     error(
                         "這台手機目前無法使用地址定位服務"
@@ -45,12 +53,19 @@ class ClassroomGeocoder(
                             "找不到${destination.buildingName}的位置"
                         )
 
-                GeoPoint(
+                coroutineContext.ensureActive()
+                val point = GeoPoint(
                     latitude =
                         address.latitude,
                     longitude =
                         address.longitude
                 )
+                coordinates[key] = point
+                Result.success(point)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Result.failure(error)
             }
         }
     }

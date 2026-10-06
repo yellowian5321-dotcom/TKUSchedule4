@@ -41,8 +41,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tkuschedule.data.Course
+import com.example.tkuschedule.location.NextClassLocationUiState
+import com.example.tkuschedule.location.NextClassLocationStatusCard
 
 private val suggestionQuestions = listOf(
+    "下一堂課要幾點出發？",
     "幫我分析哪一天最有空",
     "我的課表有衝堂嗎？",
     "哪一天的第一堂課最早？",
@@ -54,7 +57,9 @@ private val suggestionQuestions = listOf(
 fun AiAssistantScreen(
     courses: List<Course>,
     viewModel: AiAssistantViewModel =
-        androidx.lifecycle.viewmodel.compose.viewModel()
+        androidx.lifecycle.viewmodel.compose.viewModel(),
+    locationState: NextClassLocationUiState = NextClassLocationUiState(),
+    onRefreshLocation: () -> Unit = {}
 ) {
     val state by viewModel.uiState
         .collectAsStateWithLifecycle()
@@ -93,6 +98,8 @@ fun AiAssistantScreen(
                 viewModel::clearConversation
         )
 
+        NextClassLocationStatusCard(locationState, onRefreshLocation, compact = true)
+
         LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
@@ -114,7 +121,8 @@ fun AiAssistantScreen(
                     onClick = {
                         viewModel.askSuggestion(
                             question = question,
-                            courses = courses
+                            courses = courses,
+                            locationState = locationState
                         )
                     },
                     enabled = !state.isLoading
@@ -240,7 +248,7 @@ fun AiAssistantScreen(
 
                                 viewModel
                                     .sendMessage(
-                                        courses
+                                        courses, locationState
                                     )
                             }
                         }
@@ -254,7 +262,7 @@ fun AiAssistantScreen(
                     focusManager.clearFocus()
 
                     viewModel.sendMessage(
-                        courses
+                        courses, locationState
                     )
                 },
                 enabled =
@@ -452,7 +460,7 @@ private fun AiLoadingBubble() {
                     modifier = Modifier.width(8.dp)
                 )
 
-                Text("Gemini 正在分析課表…")
+                Text("Gemma 正在分析課表…")
             }
         }
     }

@@ -81,6 +81,7 @@ class FloatingCatAssistantController(
 
     private var dragging = false
     private var destroyed = false
+    private var paused = false
     private var firstPositionCompleted = false
 
     private val hideMessageRunnable =
@@ -90,7 +91,7 @@ class FloatingCatAssistantController(
 
     private val lieDownRunnable =
         Runnable {
-            if (!destroyed && !dragging) {
+            if (!destroyed && !paused && !dragging) {
                 catView.playLieDown()
                 scheduleSleep()
             }
@@ -98,10 +99,17 @@ class FloatingCatAssistantController(
 
     private val sleepRunnable =
         Runnable {
-            if (!destroyed && !dragging) {
+            if (!destroyed && !paused && !dragging) {
                 catView.playSleep()
             }
         }
+
+    private val returnToIdleRunnable = Runnable {
+        if (!destroyed && !paused && !dragging) {
+            catView.playIdle()
+            scheduleIdleActions()
+        }
+    }
 
     init {
         createMessageView()
@@ -356,15 +364,8 @@ class FloatingCatAssistantController(
 
         catView.playWave()
 
-        catView.postDelayed(
-            {
-                if (!destroyed) {
-                    catView.playIdle()
-                    scheduleIdleActions()
-                }
-            },
-            1_600L
-        )
+        mainHandler.removeCallbacks(returnToIdleRunnable)
+        mainHandler.postDelayed(returnToIdleRunnable, 1_600L)
 
         // 開啟 AI 助理
         onOpenAssistant()
@@ -464,7 +465,7 @@ class FloatingCatAssistantController(
         message: String
     ) {
         if (
-            destroyed ||
+            destroyed || paused ||
             message.isBlank()
         ) {
             return
@@ -503,15 +504,8 @@ class FloatingCatAssistantController(
         cancelIdleActions()
         catView.playWave()
 
-        catView.postDelayed(
-            {
-                if (!destroyed && !dragging) {
-                    catView.playIdle()
-                    scheduleIdleActions()
-                }
-            },
-            1_600L
-        )
+        mainHandler.removeCallbacks(returnToIdleRunnable)
+        mainHandler.postDelayed(returnToIdleRunnable, 1_600L)
 
         // 10 秒後自動消失
         mainHandler.postDelayed(
@@ -635,7 +629,7 @@ class FloatingCatAssistantController(
         cancelIdleActions()
 
         if (
-            destroyed ||
+            destroyed || paused ||
             dragging
         ) {
             return
@@ -698,6 +692,22 @@ class FloatingCatAssistantController(
                             edgeMarginPx
                     ).toFloat()
         )
+    }
+
+    fun pause() {
+        if (destroyed || paused) return
+        paused = true
+        mainHandler.removeCallbacksAndMessages(null)
+        cancelPositionAnimation()
+        messageView.animate().cancel()
+        messageView.visibility = View.GONE
+        catView.stopSpriteAnimation()
+    }
+
+    fun resume() {
+        if (destroyed) return
+        paused = false
+        if (firstPositionCompleted) scheduleIdleActions()
     }
 
     /**

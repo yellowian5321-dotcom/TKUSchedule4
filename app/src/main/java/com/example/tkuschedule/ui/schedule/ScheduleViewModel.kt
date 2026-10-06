@@ -1,15 +1,28 @@
 package com.example.tkuschedule.ui.schedule
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.tkuschedule.data.Course
 import com.example.tkuschedule.data.CourseRepository
+import com.example.tkuschedule.data.CourseStorage
 import com.example.tkuschedule.data.Department
+import com.example.tkuschedule.reminder.ClassReminderScheduler
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 
 data class CourseOffering(
     val key: String,
@@ -26,46 +39,44 @@ data class CourseOffering(
 }
 
 data class ScheduleUiState(
+    val isRestoringSchedule: Boolean = true,
     val isLoadingDepartments: Boolean = false,
     val isLoadingCourses: Boolean = false,
     val isSearchingCourses: Boolean = false,
 
-    val departments: List<Department> =
-        emptyList(),
+    val departments: List<Department> = emptyList(),
 
     val selectedDepartmentCode: String = "",
     val selectedGrade: Int? = null,
     val selectedClassName: String = "",
 
-    val loadedCourses: List<Course> =
-        emptyList(),
-
-    val manualCourses: List<Course> =
-        emptyList(),
+    val loadedCourses: List<Course> = emptyList(),
+    val manualCourses: List<Course> = emptyList(),
 
     val semester: String = "",
-
     val courseSearchQuery: String = "",
 
-    val courseSearchResults:
-    List<CourseOffering> = emptyList(),
-
-    val pendingConflictOffering:
-    CourseOffering? = null,
+    val courseSearchResults: List<CourseOffering> = emptyList(),
+    val pendingConflictOffering: CourseOffering? = null,
 
     val searchMessage: String? = null,
     val errorMessage: String? = null
 ) {
-    val courses: List<Course>
-        get() = (
-                loadedCourses + manualCourses
-                ).distinctBy { it.id }
+    val courses: List<Course> =
+        (loadedCourses + manualCourses).distinctBy { it.id }
 }
 
-class ScheduleViewModel(
+class ScheduleViewModel @JvmOverloads constructor(
+    application: Application,
     private val repository: CourseRepository =
         CourseRepository()
-) : ViewModel() {
+) : AndroidViewModel(application) {
+
+    private val courseStorage = CourseStorage(application)
+
+    private var departmentsJob: Job? = null
+    private var coursesJob: Job? = null
+    private var searchJob: Job? = null
 
     private val _uiState =
         MutableStateFlow(ScheduleUiState())
@@ -74,12 +85,84 @@ class ScheduleViewModel(
         _uiState.asStateFlow()
 
     init {
+        restoreAndObserveSchedule()
         loadDepartments()
     }
 
-    fun loadDepartments() {
+    private fun restoreAndObserveSchedule() {
         viewModelScope.launch {
+            var restored = true
 
+            try {
+                val saved = withContext(Dispatchers.IO) {
+                    courseStorage.load()
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isRestoringSchedule = false,
+                        loadedCourses = saved.loadedCourses,
+                        manualCourses = saved.manualCourses,
+                        semester = (
+                                saved.loadedCourses.firstOrNull()
+                                    ?: saved.manualCourses.firstOrNull()
+                                )?.semester.orEmpty()
+                    )
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                restored = false
+
+                _uiState.update {
+                    it.copy(
+                        isRestoringSchedule = false,
+                        errorMessage =
+                            "課表還原失敗，請重新匯入課程"
+                    )
+                }
+            }
+
+            // 還原完成後才開始儲存，避免初始空課表取消通知。
+            _uiState
+                .map {
+                    it.loadedCourses to it.manualCourses
+                }
+                .distinctUntilChanged()
+                .drop(if (restored) 0 else 1)
+                .collect { (loaded, manual) ->
+                    try {
+                        withContext(Dispatchers.IO) {
+                            courseStorage.save(
+                                loaded,
+                                manual
+                            )
+
+                            ClassReminderScheduler.updateCourses(
+                                getApplication<Application>(),
+                                (loaded + manual)
+                                    .distinctBy { it.id }
+                            )
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        _uiState.update {
+                            it.copy(
+                                errorMessage =
+                                    error.message
+                                        ?: "課表或通知排程儲存失敗"
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    fun loadDepartments() {
+        departmentsJob?.cancel()
+
+        departmentsJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isLoadingDepartments = true,
@@ -89,6 +172,7 @@ class ScheduleViewModel(
 
             repository.loadDepartments().fold(
                 onSuccess = { departments ->
+                    coroutineContext.ensureActive()
 
                     _uiState.update {
                         it.copy(
@@ -97,14 +181,13 @@ class ScheduleViewModel(
                         )
                     }
                 },
-
                 onFailure = { error ->
+                    coroutineContext.ensureActive()
 
                     _uiState.update {
                         it.copy(
                             isLoadingDepartments = false,
-                            errorMessage =
-                                error.userMessage()
+                            errorMessage = error.userMessage()
                         )
                     }
                 }
@@ -115,8 +198,11 @@ class ScheduleViewModel(
     fun selectDepartment(
         code: String
     ) {
+        coursesJob?.cancel()
+
         _uiState.update {
             it.copy(
+                isLoadingCourses = false,
                 selectedDepartmentCode = code,
                 selectedGrade = null,
                 selectedClassName = ""
@@ -127,8 +213,11 @@ class ScheduleViewModel(
     fun selectGrade(
         grade: Int
     ) {
+        coursesJob?.cancel()
+
         _uiState.update {
             it.copy(
+                isLoadingCourses = false,
                 selectedGrade = grade,
                 selectedClassName = ""
             )
@@ -138,8 +227,11 @@ class ScheduleViewModel(
     fun selectClassName(
         className: String
     ) {
+        coursesJob?.cancel()
+
         _uiState.update {
             it.copy(
+                isLoadingCourses = false,
                 selectedClassName = className
             )
         }
@@ -162,8 +254,9 @@ class ScheduleViewModel(
             return
         }
 
-        viewModelScope.launch {
+        coursesJob?.cancel()
 
+        coursesJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isLoadingCourses = true,
@@ -174,28 +267,22 @@ class ScheduleViewModel(
             repository.loadCourses(
                 departmentCode =
                     state.selectedDepartmentCode,
-
                 grade =
                     state.selectedGrade,
-
                 className =
                     state.selectedClassName
             ).fold(
                 onSuccess = { courses ->
+                    coroutineContext.ensureActive()
 
                     _uiState.update {
                         it.copy(
                             isLoadingCourses = false,
-
-                            loadedCourses =
-                                courses,
-
-                            semester =
-                                courses
-                                    .firstOrNull()
-                                    ?.semester
-                                    .orEmpty(),
-
+                            loadedCourses = courses,
+                            semester = courses
+                                .firstOrNull()
+                                ?.semester
+                                .orEmpty(),
                             errorMessage =
                                 if (courses.isEmpty()) {
                                     "找不到這個班級的課程"
@@ -205,14 +292,13 @@ class ScheduleViewModel(
                         )
                     }
                 },
-
                 onFailure = { error ->
+                    coroutineContext.ensureActive()
 
                     _uiState.update {
                         it.copy(
                             isLoadingCourses = false,
-                            errorMessage =
-                                error.userMessage()
+                            errorMessage = error.userMessage()
                         )
                     }
                 }
@@ -245,59 +331,58 @@ class ScheduleViewModel(
             return
         }
 
-        viewModelScope.launch {
+        searchJob?.cancel()
 
+        searchJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     isSearchingCourses = true,
-                    courseSearchResults =
-                        emptyList(),
+                    courseSearchResults = emptyList(),
                     searchMessage = null
                 )
             }
 
-            repository.searchCourses(query).fold(
-                onSuccess = { courses ->
+            repository.searchCoursesDetailed(query).fold(
+                onSuccess = { result ->
+                    coroutineContext.ensureActive()
 
-                    val offerings = courses
+                    val offerings = result.courses
                         .groupBy(::offeringKey)
                         .map { (key, sessions) ->
-
                             CourseOffering(
                                 key = key,
-
-                                sessions =
-                                    sessions.distinctBy {
-                                        it.id
-                                    }
+                                sessions = sessions
+                                    .distinctBy { it.id }
                             )
                         }
 
                     _uiState.update {
                         it.copy(
                             isSearchingCourses = false,
+                            courseSearchResults = offerings,
+                            searchMessage = when {
+                                !result.isComplete &&
+                                        offerings.isEmpty() ->
+                                    "${result.failedDepartments.size} 個系所暫時無法讀取，尚未找到符合課程；請重新搜尋，結果可能不完整"
 
-                            courseSearchResults =
-                                offerings,
+                                !result.isComplete ->
+                                    "${result.failedDepartments.size} 個系所暫時無法讀取，先顯示已找到的課程；可重新搜尋補齊"
 
-                            searchMessage =
-                                if (offerings.isEmpty()) {
+                                offerings.isEmpty() ->
                                     "查無符合的課程"
-                                } else {
-                                    null
-                                }
+
+                                else -> null
+                            }
                         )
                     }
                 },
-
                 onFailure = { error ->
+                    coroutineContext.ensureActive()
 
                     _uiState.update {
                         it.copy(
                             isSearchingCourses = false,
-
-                            searchMessage =
-                                error.userMessage()
+                            searchMessage = error.userMessage()
                         )
                     }
                 }
@@ -310,19 +395,16 @@ class ScheduleViewModel(
     ) {
         val state = _uiState.value
 
-        val alreadyExists =
-            state.courses.any {
-                offeringKey(it) == offering.key
-            }
+        val alreadyExists = state.courses.any {
+            offeringKey(it) == offering.key
+        }
 
         if (alreadyExists) {
             _uiState.update {
                 it.copy(
                     searchMessage =
                         "這門課已經在課表中",
-
-                    courseSearchResults =
-                        emptyList()
+                    courseSearchResults = emptyList()
                 )
             }
             return
@@ -336,8 +418,7 @@ class ScheduleViewModel(
         ) {
             _uiState.update {
                 it.copy(
-                    pendingConflictOffering =
-                        offering
+                    pendingConflictOffering = offering
                 )
             }
         } else {
@@ -347,8 +428,7 @@ class ScheduleViewModel(
 
     fun confirmConflict() {
         val offering =
-            _uiState.value
-                .pendingConflictOffering
+            _uiState.value.pendingConflictOffering
 
         if (offering != null) {
             addOffering(offering)
@@ -367,7 +447,6 @@ class ScheduleViewModel(
         course: Course
     ) {
         _uiState.update { state ->
-
             val key = offeringKey(course)
 
             state.copy(
@@ -380,11 +459,12 @@ class ScheduleViewModel(
     }
 
     fun clearSearchResults() {
+        searchJob?.cancel()
+
         _uiState.update {
             it.copy(
-                courseSearchResults =
-                    emptyList(),
-
+                isSearchingCourses = false,
+                courseSearchResults = emptyList(),
                 searchMessage = null
             )
         }
@@ -399,8 +479,11 @@ class ScheduleViewModel(
     }
 
     fun clearCourses() {
+        coursesJob?.cancel()
+
         _uiState.update {
             it.copy(
+                isLoadingCourses = false,
                 loadedCourses = emptyList(),
                 manualCourses = emptyList(),
                 semester = ""
@@ -411,7 +494,6 @@ class ScheduleViewModel(
     fun getCoursesForDay(
         day: Int
     ): List<Course> {
-
         return _uiState.value
             .courses
             .filter {
@@ -423,7 +505,6 @@ class ScheduleViewModel(
         offering: CourseOffering
     ) {
         _uiState.update { state ->
-
             state.copy(
                 manualCourses = (
                         state.manualCourses +
@@ -431,10 +512,7 @@ class ScheduleViewModel(
                         ).distinctBy { it.id },
 
                 pendingConflictOffering = null,
-
-                courseSearchResults =
-                    emptyList(),
-
+                courseSearchResults = emptyList(),
                 courseSearchQuery = "",
 
                 searchMessage =
@@ -447,14 +525,9 @@ class ScheduleViewModel(
         existing: List<Course>,
         incoming: List<Course>
     ): Boolean {
-
         return incoming.any { newCourse ->
-
             existing.any { oldCourse ->
-
-                oldCourse.weekday ==
-                        newCourse.weekday &&
-
+                oldCourse.weekday == newCourse.weekday &&
                         oldCourse.periods.any {
                             it in newCourse.periods
                         }
@@ -462,9 +535,7 @@ class ScheduleViewModel(
         }
     }
 
-    private fun Throwable.userMessage():
-            String {
-
+    private fun Throwable.userMessage(): String {
         return message
             ?.takeIf { it.isNotBlank() }
             ?: "讀取資料失敗，請檢查網路後再試一次"
@@ -474,13 +545,9 @@ class ScheduleViewModel(
 private fun offeringKey(
     course: Course
 ): String {
-
     return if (course.courseNo.isNotBlank()) {
-
         "${course.departmentCode}|${course.courseNo}"
-
     } else {
-
         "${course.departmentCode}|" +
                 "${course.subjectCode}|" +
                 "${course.className}|" +
